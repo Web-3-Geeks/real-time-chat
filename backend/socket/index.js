@@ -6,7 +6,7 @@ const Message = require("../models/Message");
 const initSocket = (httpServer) => {
   const io = new Server(httpServer, {
     cors: {
-      origin: [process.env.FRONTEND_URL, 'http://localhost:5173'],
+      origin: process.env.FRONTEND_URL,
     },
   });
 

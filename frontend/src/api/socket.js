@@ -7,9 +7,6 @@ export const connectSocket = (token) => {
 
   socket = io(import.meta.env.VITE_SOCKET_URL, {
     auth: { token },
-    extraHeaders: {
-      'bypass-tunnel-reminder': 'true',
-    },
   });
 
   return socket;

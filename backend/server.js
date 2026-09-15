@@ -11,8 +11,7 @@ const authRoutes = require('./routes/authRoutes');
 const userRoutes = require('./routes/userRoutes');
 const conversationRoutes = require('./routes/conversationRoutes');
 
-const allowedOrigins = [process.env.FRONTEND_URL, 'http://localhost:5173'];
-app.use(cors({ origin: allowedOrigins }));
+app.use(cors({ origin: process.env.FRONTEND_URL }));
 app.use(express.json());
 
 app.use(async (req, res, next) => {
