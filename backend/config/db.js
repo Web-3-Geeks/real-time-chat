@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const Conversation = require('../models/Conversation');
 
 let isConnected = false;
 
@@ -9,6 +10,7 @@ const connectDB = async () => {
         await mongoose.connect(process.env.MONGO_URI, {
             serverSelectionTimeoutMS: 8000,
         });
+        await Conversation.syncIndexes();
         isConnected = true;
         console.log('MongoDB connected');
     } catch (error) {

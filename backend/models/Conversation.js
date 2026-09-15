@@ -10,6 +10,11 @@ const conversationSchema = new mongoose.Schema(
         name: {
             type: String
         },
+        pairKey: {
+            type: String,
+            unique: true,
+            sparse: true,
+        },
     },
     { timestamps: true }
 )

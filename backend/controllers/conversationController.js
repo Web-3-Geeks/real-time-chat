@@ -16,31 +16,22 @@ const createOrGetConversation = async (req, res) => {
         .json({ message: "Cannot start a conversation with yourself" });
     }
 
-    const myConversationIds = await ConversationMember.find({
-      userId: req.user._id,
-    }).distinct("conversationId");
+    const pairKey = [req.user._id.toString(), recipientId].sort().join("_");
 
-    const sharedMembership = await ConversationMember.findOne({
-      userId: recipientId,
-      conversationId: { $in: myConversationIds },
-    });
-
-    let conversation = null;
-
-    if (sharedMembership) {
-      conversation = await Conversation.findOne({
-        _id: sharedMembership.conversationId,
-        type: "private",
-      });
-    }
-
-    if (!conversation) {
-      conversation = await Conversation.create({ type: "private" });
+    let conversation;
+    try {
+      conversation = await Conversation.create({ type: "private", pairKey });
 
       await ConversationMember.create([
         { conversationId: conversation._id, userId: req.user._id },
         { conversationId: conversation._id, userId: recipientId },
       ]);
+    } catch (err) {
+      if (err.code === 11000) {
+        conversation = await Conversation.findOne({ pairKey, type: "private" });
+      } else {
+        throw err;
+      }
     }
 
     res.status(200).json(conversation);
