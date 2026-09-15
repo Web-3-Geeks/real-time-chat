@@ -33,12 +33,9 @@ function DashboardLayout({ children }) {
           <NavLink to="/dashboard" className={navLinkClass}>
             Dashboard
           </NavLink>
-          <span
-            className="flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm font-medium text-muted opacity-50"
-            aria-disabled="true"
-          >
-            Chats (soon)
-          </span>
+          <NavLink to="/chat" className={navLinkClass}>
+            Chats
+          </NavLink>
           <NavLink to="/profile" className={navLinkClass}>
             Profile
           </NavLink>

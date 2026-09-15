@@ -1,4 +1,5 @@
-import { createContext, useState, useContext } from 'react';
+import { createContext, useState, useContext, useEffect } from 'react';
+import { connectSocket, disconnectSocket } from '../api/socket';
 
 const AuthContext = createContext();
 
@@ -8,16 +9,39 @@ export const AuthProvider = ({ children }) => {
     return savedUser ? JSON.parse(savedUser) : null;
   })
 
+  const [socketStatus, setSocketStatus] = useState(() =>
+    localStorage.getItem('token') ? 'connecting' : 'disconnected'
+  );
+
+  const attachSocket = (token) => {
+    const socket = connectSocket(token);
+
+    socket.on('connect', () => setSocketStatus('connected'));
+    socket.on('disconnect', () => setSocketStatus('disconnected'));
+    socket.on('connect_error', () => setSocketStatus('error'));
+  };
+
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    if (token) attachSocket(token);
+
+    return () => disconnectSocket();
+  }, []);
+
   const login = (userData) => {
     setUser(userData);
     localStorage.setItem('user', JSON.stringify(userData));
     localStorage.setItem('token', userData.token);
+    setSocketStatus('connecting');
+    attachSocket(userData.token);
   }
 
   const logout = () => {
   setUser(null);
   localStorage.removeItem('user');
   localStorage.removeItem('token');
+  disconnectSocket();
+  setSocketStatus('disconnected');
 };
 
   const updateUser = (updatedFields) => {
@@ -30,7 +54,7 @@ export const AuthProvider = ({ children }) => {
 
 
   return (
-  <AuthContext.Provider value={{ user, login, logout, updateUser }}>
+  <AuthContext.Provider value={{ user, login, logout, updateUser, socketStatus }}>
     {children}
   </AuthContext.Provider>
 );

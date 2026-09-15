@@ -6,6 +6,15 @@ const getProfile = async (req, res) => {
   res.status(200).json(req.user);
 };
 
+const listUsers = async (req, res) => {
+  try {
+    const users = await User.find({ _id: { $ne: req.user._id } }).select('-password');
+    res.status(200).json(users);
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
 const updateProfile = async (req, res) => {
   try {
     const { name, avatar } = req.body;
@@ -24,4 +33,4 @@ const updateProfile = async (req, res) => {
   }
 };
 
-module.exports = { getProfile, updateProfile };
+module.exports = { getProfile, updateProfile, listUsers };
