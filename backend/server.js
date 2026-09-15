@@ -4,15 +4,18 @@ const express = require('express');
 const cors = require('cors');
 const connectDB = require('./config/db');
 
-connectDB();
-
 const app = express();
 const authRoutes = require('./routes/authRoutes');
 const userRoutes = require('./routes/userRoutes');
 
-
 app.use(cors({ origin: process.env.FRONTEND_URL }));
 app.use(express.json());
+
+app.use(async (req, res, next) => {
+  await connectDB();
+  next();
+});
+
 app.use('/api/auth', authRoutes)
 app.use('/api/users', userRoutes);
 
