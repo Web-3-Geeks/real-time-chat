@@ -3,6 +3,7 @@
 Each `DayN/` folder is a complete, standalone copy of the project exactly as it stood at the end of that day. These are for evaluation purposes only — the actual, current app lives at the repo root.
 
 - **Day1/** — Project setup, MongoDB connection, JWT authentication (register/login/protected routes), user profile endpoints, initial chat data models (User, Conversation, ConversationMember, Message), and the frontend auth UI (Login, Register, Dashboard, Profile).
+- **Day2/** — Socket.io integration (authenticated connections, conversation rooms, real-time send/receive messaging), conversation create/list/message-history APIs, and the Chat UI (user list, message thread, connection status indicator). Backend moved from Vercel to Railway since Socket.io needs a persistent server.
 
 ## archive/
 
