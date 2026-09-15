@@ -1,5 +1,6 @@
 
 require('dotenv').config();
+const http = require('http');
 const express = require('express');
 const cors = require('cors');
 const connectDB = require('./config/db');
@@ -25,12 +26,11 @@ app.get('/api/health', (req, res) => {
     res.json({ status: 'ok' });
 });
 
+const httpServer = http.createServer(app);
+
 const PORT = process.env.PORT || 5000;
+httpServer.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
 
-if (process.env.NODE_ENV !== 'production') {
-  app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-  });
-}
-
-module.exports = app;
+module.exports = { app, httpServer };
