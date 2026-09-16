@@ -78,8 +78,8 @@ Frontend runs on `http://localhost:5173`.
 | GET | `/api/users` | Yes | List all other users (to start a conversation) |
 | GET | `/api/users/me` | Yes | Get the authenticated user's profile |
 | PATCH | `/api/users/me` | Yes | Update `name` and/or `avatar` |
-| POST | `/api/conversations` | Yes | Find or create a private conversation with `recipientId` |
-| GET | `/api/conversations` | Yes | List the authenticated user's conversations, with the other member and last message |
+| POST | `/api/conversations` | Yes | Find/create a private conversation (`recipientId`), or create a group (`type: "group"`, `name`, `memberIds`: at least 2 other users, no duplicates, all must exist) |
+| GET | `/api/conversations` | Yes | List the authenticated user's conversations (private and group), each with members/other-user info and last message |
 | GET | `/api/conversations/:conversationId/messages` | Yes | Get message history for a conversation (chronological, paginated via `limit`/`before`) |
 
 Protected routes require an `Authorization: Bearer <token>` header.
@@ -90,10 +90,12 @@ The Socket.io connection is authenticated using the same JWT as the REST API, pa
 
 | Event | Direction | Payload | Description |
 |---|---|---|---|
-| `join_conversation` | Client → Server | `conversationId`, ack callback | Verifies membership, joins the Socket.io room for that conversation |
-| `leave_conversation` | Client → Server | `conversationId` | Leaves the room |
-| `send_message` | Client → Server | `{ conversationId, content }`, ack callback | Validates membership + content, saves the message, broadcasts it to the room |
-| `receive_message` | Server → Client | `{ id, conversationId, senderId, content, createdAt }` | Sent to every socket in the room (including the sender) when a new message arrives |
+| `join_conversation` | Client → Server | `conversationId`, ack callback | Verifies membership, joins the Socket.io room for that conversation. Ack includes `onlineMembers` (user IDs currently online) so the UI has presence info immediately |
+| `leave_conversation` | Client → Server | `conversationId` | Leaves the room, stops any typing indicator the user had active there |
+| `send_message` | Client → Server | `{ conversationId, content }`, ack callback | Validates membership + content, saves the message, delivers it to every member (see note below) |
+| `receive_message` | Server → Client | `{ id, conversationId, senderId, content, createdAt }` | Delivered to every conversation member's personal room (joined by `userId` on connect) — including the sender, and including members who don't currently have this conversation open (so an unread indicator can be shown) |
+| `user_online` / `user_offline` | Server → Client | `{ userId }` | Sent to everyone who shares a conversation with that user, when their first socket connects / last socket disconnects (multiple tabs/devices count as one presence) |
+| `typing_start` / `typing_stop` | Client ↔ Server | `conversationId` (in), `{ conversationId, userId }` (out) | Client emits on typing/pause/send/leave; server verifies membership and re-broadcasts to the conversation room only (`socket.to(...)`, so the typer never gets their own event back) |
 
 ### Testing Socket.io / real-time messaging
 
@@ -144,6 +146,25 @@ The Postman collection (`postman-collection.json`) covers the REST auth/user end
 - **Race condition in conversation creation:** if two users started a conversation with each other at almost the same moment, both requests could independently pass the "does a conversation already exist?" check before either had created one, resulting in two separate conversations — the two users would then be in different Socket.io rooms and never see each other's messages. Fixed with a unique, sparse `pairKey` field on `Conversation` (sorted, joined user IDs) and a create-then-catch-duplicate-key pattern, so the database itself guarantees only one conversation per user pair.
 - **Mongoose indexes were not being built reliably** on connect in this setup; `connectDB()` now explicitly calls `Conversation.syncIndexes()` after connecting to guarantee the `pairKey` uniqueness constraint actually exists.
 - **`send_message`/`receive_message` avoid duplicate rendering** by never optimistically adding a sent message to the UI — the frontend only ever appends a message when the `receive_message` event arrives (which happens for the sender too), so there's exactly one source of truth for what's on screen.
+
+## Week 3 — Day 3: Group Conversations, Presence & Typing Indicators
+
+**What was built:**
+
+- Group conversations: `POST /api/conversations` with `type: "group"` validates the name, member list (≥2 others, no duplicates, all must exist as real users), auto-adds the creator, and creates the group + memberships.
+- `GET /api/conversations` now returns both private and group conversations in one list, each shaped appropriately (group: `name` + `members`; private: `otherUser`).
+- Online/offline presence: an in-memory `Map<userId, Set<socketId>>` tracks how many active sockets each user has (multiple tabs/devices), so a user is only marked offline once their *last* socket disconnects. `user_online`/`user_offline` are broadcast only to users who actually share a conversation with them.
+- Typing indicators with client-side debounce: typing emits `typing_start` once, then a 2s idle timer emits `typing_stop`; sending a message, leaving the conversation, or disconnecting also stops it immediately. The UI renders "X is typing...", "X and Y are typing...", or "N people are typing...".
+- Chat UI reworked into a proper conversation list (private + group, last-message preview) instead of a flat "pick a user" list, with inline panels to start a new 1:1 chat or create a group.
+- Show/hide toggle on password fields (`PasswordInput` component, shared by Login and Register).
+- Unread-message indicator: a dot on any conversation in the sidebar that received a message while it wasn't the open conversation, cleared when opened.
+
+**Key architectural decisions / bugs found and fixed:**
+
+- **Message delivery moved from the conversation room to each member's personal room.** Originally `send_message` broadcast via `io.to(conversationId)`, but a user only joins that room when they actively open the conversation — so a member who hadn't opened it yet would never receive the event, making the unread-indicator feature impossible. Every socket already joins a room named by its own `userId` on connect (for presence); `send_message` now emits to each member's `userId` room instead, so everyone gets notified regardless of what they currently have open. Typing indicators intentionally stayed scoped to the conversation room (`socket.to(conversationId)`) — showing "typing..." to someone who doesn't even have the chat open isn't useful.
+- **A real crash bug:** Socket.io connections don't go through Express's middleware chain, so the `connectDB()`-per-request pattern from Day 2 never ran for a socket-only connection. The new presence code queried MongoDB immediately on connect, and if no HTTP request had happened first, Mongoose's query buffer would time out after 10s and throw an *unhandled* rejection inside an `async` Socket.io handler — which crashes the whole Node process, not just that connection. Fixed by calling `connectDB()` explicitly at the top of the connection handler, and wrapping every async socket event handler in a `safe()` helper that catches and logs errors instead of taking the server down (the kind of centralized-error-handling gap flagged in the Day 1 review, applied here so it isn't repeated).
+- **A React 18 StrictMode double-socket bug:** in dev, StrictMode invokes effects twice. `AuthContext`'s mount effect had a cleanup that called `disconnectSocket()`, so the sequence became connect → (StrictMode test-cleanup) disconnect → connect again — and `connectSocket()`'s guard (`if (socket?.connected) return socket`) didn't catch the second call because the first connection hadn't finished its handshake yet (`.connected` was still `false`), so a second, separate socket object got created. Any component whose effects had already grabbed the first (now-abandoned) socket reference — like Chat's message/presence listeners — kept listening on a dead connection while the real traffic went through the second one. Fixed two ways: removed the unnecessary disconnect-on-cleanup from `AuthContext` (a session-wide socket has no business tearing down on a component re-mount), and changed the guard to `if (socket) return socket` so simply having created a socket already (connected or not) is enough to reuse it.
+- **Backfilled a Day 2 bug this surfaced:** conversations created before the `pairKey` fix landed had no `pairKey`, so reopening one of those (e.g. from the Dashboard) would silently create a *second*, empty conversation for the same pair instead of reusing the original — messages looked like they'd "disappeared." A one-time migration script backfilled `pairKey` on every pre-existing private conversation and merged any duplicates it found (moving their messages onto the oldest conversation before deleting the duplicate), then was deleted — it was a one-off data fix, not part of the app.
 
 ## Deployment
 

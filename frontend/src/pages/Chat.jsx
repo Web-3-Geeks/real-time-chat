@@ -7,69 +7,147 @@ import { useAuth } from '../context/AuthContext';
 
 const getSenderId = (msg) => (typeof msg.senderId === 'object' ? msg.senderId._id : msg.senderId);
 
-const statusStyles = {
-  connected: { label: 'Connected', dot: 'bg-green-500' },
-  connecting: { label: 'Connecting...', dot: 'bg-yellow-500' },
-  disconnected: { label: 'Disconnected', dot: 'bg-gray-400' },
-  error: { label: 'Connection error', dot: 'bg-danger' },
-};
+const conversationLabel = (conv) => (conv.type === 'group' ? conv.name : conv.otherUser?.name || 'Unknown');
+
+const conversationInitial = (conv) => conversationLabel(conv)?.[0]?.toUpperCase() || '?';
+
+const TYPING_TIMEOUT_MS = 2000;
 
 function Chat() {
-  const { user, socketStatus } = useAuth();
+  const { user } = useAuth();
   const location = useLocation();
-  const [users, setUsers] = useState([]);
-  const [activeUser, setActiveUser] = useState(null);
+
+  const [conversations, setConversations] = useState([]);
+  const [loadingConversations, setLoadingConversations] = useState(true);
   const [activeConversation, setActiveConversation] = useState(null);
   const [messages, setMessages] = useState([]);
-  const [messageInput, setMessageInput] = useState('');
   const [loadingMessages, setLoadingMessages] = useState(false);
+  const [messageInput, setMessageInput] = useState('');
   const [error, setError] = useState('');
+  const [onlineUserIds, setOnlineUserIds] = useState(new Set());
+  const [typingUserIds, setTypingUserIds] = useState(new Set());
+  const [unreadIds, setUnreadIds] = useState(new Set());
+
+  const [allUsers, setAllUsers] = useState([]);
+  const [panel, setPanel] = useState(null); // null | 'chat' | 'group'
+  const [groupName, setGroupName] = useState('');
+  const [groupMemberIds, setGroupMemberIds] = useState([]);
+
   const messagesEndRef = useRef(null);
+  const activeConversationRef = useRef(null);
+  const isTypingRef = useRef(false);
+  const typingTimeoutRef = useRef(null);
 
   useEffect(() => {
-    axiosInstance.get('/users').then((res) => setUsers(res.data));
+    activeConversationRef.current = activeConversation;
+  }, [activeConversation]);
+
+  useEffect(() => {
+    axiosInstance.get('/users').then((res) => setAllUsers(res.data));
+    axiosInstance
+      .get('/conversations')
+      .then((res) => setConversations(res.data))
+      .finally(() => setLoadingConversations(false));
   }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Global listeners: independent of which conversation is currently open.
   useEffect(() => {
     const socket = getSocket();
     if (!socket) return;
 
     const handleReceive = (msg) => {
-      if (msg.conversationId === activeConversation?._id) {
+      setConversations((prev) => {
+        const idx = prev.findIndex((c) => c._id === msg.conversationId);
+        if (idx === -1) return prev;
+        const updated = {
+          ...prev[idx],
+          lastMessage: { content: msg.content, createdAt: msg.createdAt },
+          updatedAt: msg.createdAt,
+        };
+        const rest = prev.filter((_, i) => i !== idx);
+        return [updated, ...rest];
+      });
+
+      if (msg.conversationId === activeConversationRef.current?._id) {
         setMessages((prev) => [...prev, msg]);
+      } else {
+        setUnreadIds((prev) => new Set(prev).add(msg.conversationId));
       }
     };
 
-    socket.on('receive_message', handleReceive);
-    return () => socket.off('receive_message', handleReceive);
-  }, [activeConversation]);
+    const handleOnline = ({ userId }) =>
+      setOnlineUserIds((prev) => new Set(prev).add(userId));
 
-  const handleSelectUser = async (otherUser) => {
+    const handleOffline = ({ userId }) =>
+      setOnlineUserIds((prev) => {
+        const next = new Set(prev);
+        next.delete(userId);
+        return next;
+      });
+
+    const handleTypingStart = ({ conversationId, userId }) => {
+      if (conversationId !== activeConversationRef.current?._id) return;
+      setTypingUserIds((prev) => new Set(prev).add(userId));
+    };
+
+    const handleTypingStop = ({ conversationId, userId }) => {
+      if (conversationId !== activeConversationRef.current?._id) return;
+      setTypingUserIds((prev) => {
+        const next = new Set(prev);
+        next.delete(userId);
+        return next;
+      });
+    };
+
+    socket.on('receive_message', handleReceive);
+    socket.on('user_online', handleOnline);
+    socket.on('user_offline', handleOffline);
+    socket.on('typing_start', handleTypingStart);
+    socket.on('typing_stop', handleTypingStop);
+
+    return () => {
+      socket.off('receive_message', handleReceive);
+      socket.off('user_online', handleOnline);
+      socket.off('user_offline', handleOffline);
+      socket.off('typing_start', handleTypingStart);
+      socket.off('typing_stop', handleTypingStop);
+    };
+  }, []);
+
+  const stopTypingSignal = (conversationId) => {
+    clearTimeout(typingTimeoutRef.current);
+    if (isTypingRef.current) {
+      getSocket()?.emit('typing_stop', conversationId);
+      isTypingRef.current = false;
+    }
+  };
+
+  const openConversation = async (conv) => {
     setError('');
     const socket = getSocket();
 
     if (activeConversation) {
+      stopTypingSignal(activeConversation._id);
       socket?.emit('leave_conversation', activeConversation._id);
     }
 
-    setActiveUser(otherUser);
-    setActiveConversation(null);
+    setPanel(null);
+    setActiveConversation(conv);
     setMessages([]);
+    setTypingUserIds(new Set());
     setLoadingMessages(true);
+    setUnreadIds((prev) => {
+      const next = new Set(prev);
+      next.delete(conv._id);
+      return next;
+    });
 
     try {
-      const { data: conversation } = await axiosInstance.post('/conversations', {
-        recipientId: otherUser._id,
-      });
-      setActiveConversation(conversation);
-
-      const { data: history } = await axiosInstance.get(
-        `/conversations/${conversation._id}/messages`
-      );
+      const { data: history } = await axiosInstance.get(`/conversations/${conv._id}/messages`);
       setMessages(history);
 
       if (!socket) {
@@ -77,8 +155,12 @@ function Chat() {
         return;
       }
 
-      socket.emit('join_conversation', conversation._id, (ack) => {
-        if (!ack?.success) setError(ack?.message || 'Could not join conversation');
+      socket.emit('join_conversation', conv._id, (ack) => {
+        if (!ack?.success) {
+          setError(ack?.message || 'Could not join conversation');
+          return;
+        }
+        setOnlineUserIds((prev) => new Set([...prev, ...(ack.onlineMembers || [])]));
       });
     } catch {
       setError('Failed to open conversation. Please try again.');
@@ -88,13 +170,81 @@ function Chat() {
   };
 
   useEffect(() => {
-    const openUserId = location.state?.openUserId;
-    if (!openUserId || users.length === 0) return;
-
-    const targetUser = users.find((u) => u._id === openUserId);
-    if (targetUser) queueMicrotask(() => handleSelectUser(targetUser));
+    const openId = location.state?.openConversationId;
+    if (!openId || conversations.length === 0) return;
+    const target = conversations.find((c) => c._id === openId);
+    if (target) queueMicrotask(() => openConversation(target));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [users, location.state]);
+  }, [conversations, location.state]);
+
+  const startPrivateChat = async (otherUser) => {
+    setError('');
+    try {
+      const { data: conv } = await axiosInstance.post('/conversations', { recipientId: otherUser._id });
+      const fullConv = { ...conv, type: 'private', otherUser, lastMessage: null };
+      setConversations((prev) => {
+        if (prev.some((c) => c._id === fullConv._id)) return prev;
+        return [fullConv, ...prev];
+      });
+      openConversation(fullConv);
+    } catch {
+      setError('Failed to start conversation.');
+    }
+  };
+
+  const toggleGroupMember = (userId) => {
+    setGroupMemberIds((prev) =>
+      prev.includes(userId) ? prev.filter((id) => id !== userId) : [...prev, userId]
+    );
+  };
+
+  const createGroup = async () => {
+    setError('');
+    if (!groupName.trim()) {
+      setError('Group name is required');
+      return;
+    }
+    if (groupMemberIds.length < 2) {
+      setError('Select at least 2 members');
+      return;
+    }
+    try {
+      const { data: conv } = await axiosInstance.post('/conversations', {
+        type: 'group',
+        name: groupName.trim(),
+        memberIds: groupMemberIds,
+      });
+      const members = [
+        { _id: user._id, name: user.name, avatar: user.avatar },
+        ...allUsers.filter((u) => groupMemberIds.includes(u._id)),
+      ];
+      const fullConv = { ...conv, type: 'group', members, lastMessage: null };
+      setConversations((prev) => [fullConv, ...prev]);
+      setGroupName('');
+      setGroupMemberIds([]);
+      openConversation(fullConv);
+    } catch {
+      setError('Failed to create group.');
+    }
+  };
+
+  const handleInputChange = (e) => {
+    setMessageInput(e.target.value);
+    if (!activeConversation) return;
+
+    const socket = getSocket();
+    if (!socket) return;
+
+    if (e.target.value.trim() && !isTypingRef.current) {
+      isTypingRef.current = true;
+      socket.emit('typing_start', activeConversation._id);
+    }
+
+    clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = setTimeout(() => {
+      stopTypingSignal(activeConversation._id);
+    }, TYPING_TIMEOUT_MS);
+  };
 
   const handleSend = (e) => {
     e.preventDefault();
@@ -103,10 +253,12 @@ function Chat() {
     if (!messageInput.trim() || !activeConversation) return;
 
     const socket = getSocket();
-    if (!socket || socketStatus !== 'connected') {
+    if (!socket) {
       setError('Not connected to chat server.');
       return;
     }
+
+    stopTypingSignal(activeConversation._id);
 
     socket.emit(
       'send_message',
@@ -118,55 +270,173 @@ function Chat() {
     setMessageInput('');
   };
 
-  const status = statusStyles[socketStatus] || statusStyles.disconnected;
+  const otherUsers = allUsers.filter((u) => u._id !== user._id);
+
+  const nameFor = (userId) => {
+    if (activeConversation?.type === 'group') {
+      return activeConversation.members?.find((m) => m._id === userId)?.name || 'Someone';
+    }
+    return activeConversation?.otherUser?.name || 'Someone';
+  };
+
+  const typingText = () => {
+    const names = [...typingUserIds].map(nameFor);
+    if (names.length === 0) return null;
+    if (names.length === 1) return `${names[0]} is typing...`;
+    if (names.length === 2) return `${names[0]} and ${names[1]} are typing...`;
+    return `${names.length} people are typing...`;
+  };
+
+  const presenceLabel = () => {
+    if (!activeConversation) return null;
+    if (activeConversation.type === 'group') {
+      const onlineCount = (activeConversation.members || []).filter((m) =>
+        onlineUserIds.has(m._id)
+      ).length;
+      return `${onlineCount} member${onlineCount === 1 ? '' : 's'} online`;
+    }
+    const isOnline = onlineUserIds.has(activeConversation.otherUser?._id);
+    return isOnline ? 'Online' : 'Offline';
+  };
 
   return (
     <DashboardLayout>
       <div className="flex h-[calc(100svh-2.5rem)] md:h-[calc(100svh-4rem)] -m-5 md:-m-8 border-t border-line dark:border-line-dark">
-        <aside className="w-64 flex-shrink-0 border-r border-line dark:border-line-dark bg-surface dark:bg-surface-dark overflow-y-auto hidden sm:block">
-          <div className="px-4 py-3 border-b border-line dark:border-line-dark">
-            <h2 className="text-sm font-semibold text-ink dark:text-ink-dark">Users</h2>
+        <aside className="w-64 flex-shrink-0 border-r border-line dark:border-line-dark bg-surface dark:bg-surface-dark overflow-y-auto hidden sm:flex sm:flex-col">
+          <div className="px-4 py-3 border-b border-line dark:border-line-dark flex items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold text-ink dark:text-ink-dark">Chats</h2>
+            <div className="flex gap-1">
+              <button
+                onClick={() => setPanel(panel === 'chat' ? null : 'chat')}
+                className="text-xs px-2 py-1 rounded-md bg-accent-soft text-accent font-medium"
+              >
+                + Chat
+              </button>
+              <button
+                onClick={() => setPanel(panel === 'group' ? null : 'group')}
+                className="text-xs px-2 py-1 rounded-md bg-accent-soft text-accent font-medium"
+              >
+                + Group
+              </button>
+            </div>
           </div>
-          {users.length === 0 && (
-            <p className="text-sm text-muted px-4 py-6 text-center">No other users yet.</p>
+
+          {panel === 'chat' && (
+            <div className="border-b border-line dark:border-line-dark max-h-64 overflow-y-auto">
+              {otherUsers.map((u) => (
+                <button
+                  key={u._id}
+                  onClick={() => startPrivateChat(u)}
+                  className="w-full flex items-center gap-2.5 px-4 py-2.5 text-left text-sm text-ink dark:text-ink-dark hover:bg-page dark:hover:bg-page-dark"
+                >
+                  <span className="w-7 h-7 rounded-full bg-nav-active dark:bg-nav-active-dark text-nav-active-ink dark:text-nav-active-ink-dark flex items-center justify-center text-xs font-semibold flex-shrink-0">
+                    {u.name?.[0]?.toUpperCase()}
+                  </span>
+                  {u.name}
+                </button>
+              ))}
+            </div>
           )}
-          {users.map((u) => (
-            <button
-              key={u._id}
-              onClick={() => handleSelectUser(u)}
-              className={`w-full flex items-center gap-2.5 px-4 py-3 text-left text-sm transition-colors ${
-                activeUser?._id === u._id
-                  ? 'bg-nav-active dark:bg-nav-active-dark text-nav-active-ink dark:text-nav-active-ink-dark'
-                  : 'text-ink dark:text-ink-dark hover:bg-page dark:hover:bg-page-dark'
-              }`}
-            >
-              <span className="w-8 h-8 rounded-full bg-nav-active dark:bg-nav-active-dark text-nav-active-ink dark:text-nav-active-ink-dark flex items-center justify-center text-xs font-semibold flex-shrink-0">
-                {u.name?.[0]?.toUpperCase() || '?'}
-              </span>
-              <span className="truncate">{u.name}</span>
-            </button>
-          ))}
+
+          {panel === 'group' && (
+            <div className="border-b border-line dark:border-line-dark p-3 flex flex-col gap-2 max-h-80 overflow-y-auto">
+              <input
+                type="text"
+                placeholder="Group name"
+                value={groupName}
+                onChange={(e) => setGroupName(e.target.value)}
+                className="px-2.5 py-2 rounded-lg border border-line dark:border-line-dark bg-page dark:bg-page-dark text-ink dark:text-ink-dark text-sm outline-none focus:border-accent"
+              />
+              <div className="flex flex-col gap-1 max-h-36 overflow-y-auto">
+                {otherUsers.map((u) => (
+                  <label
+                    key={u._id}
+                    className="flex items-center gap-2 text-sm text-ink dark:text-ink-dark px-1 py-1"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={groupMemberIds.includes(u._id)}
+                      onChange={() => toggleGroupMember(u._id)}
+                    />
+                    {u.name}
+                  </label>
+                ))}
+              </div>
+              <button
+                onClick={createGroup}
+                className="py-2 rounded-lg bg-accent text-white text-sm font-semibold hover:opacity-90"
+              >
+                Create Group
+              </button>
+            </div>
+          )}
+
+          <div className="flex-1 overflow-y-auto">
+            {loadingConversations && (
+              <p className="text-sm text-muted text-center py-6">Loading...</p>
+            )}
+            {!loadingConversations && conversations.length === 0 && (
+              <p className="text-sm text-muted text-center py-6 px-4">
+                No conversations yet. Start one above.
+              </p>
+            )}
+            {conversations.map((conv) => (
+              <button
+                key={conv._id}
+                onClick={() => openConversation(conv)}
+                className={`w-full flex items-center gap-2.5 px-4 py-3 text-left transition-colors ${
+                  activeConversation?._id === conv._id
+                    ? 'bg-nav-active dark:bg-nav-active-dark'
+                    : 'hover:bg-page dark:hover:bg-page-dark'
+                }`}
+              >
+                <span className="w-8 h-8 rounded-full bg-nav-active dark:bg-nav-active-dark text-nav-active-ink dark:text-nav-active-ink-dark flex items-center justify-center text-xs font-semibold flex-shrink-0">
+                  {conversationInitial(conv)}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium text-ink dark:text-ink-dark truncate">
+                    {conversationLabel(conv)}
+                  </p>
+                  <p className="text-xs text-muted truncate">
+                    {conv.lastMessage ? conv.lastMessage.content : 'No messages yet'}
+                  </p>
+                </div>
+                {unreadIds.has(conv._id) && (
+                  <span className="w-2 h-2 rounded-full bg-accent flex-shrink-0" aria-label="Unread message" />
+                )}
+              </button>
+            ))}
+          </div>
         </aside>
 
         <section className="flex-1 flex flex-col min-w-0">
-          {!activeUser ? (
+          {!activeConversation ? (
             <div className="flex-1 flex items-center justify-center text-muted text-sm">
-              Select a user to start chatting
+              Select a conversation, or start a new chat/group
             </div>
           ) : (
             <>
               <header className="flex items-center justify-between gap-3 px-5 py-3 border-b border-line dark:border-line-dark bg-surface dark:bg-surface-dark">
                 <div className="flex items-center gap-2.5 min-w-0">
                   <span className="w-8 h-8 rounded-full bg-nav-active dark:bg-nav-active-dark text-nav-active-ink dark:text-nav-active-ink-dark flex items-center justify-center text-xs font-semibold flex-shrink-0">
-                    {activeUser.name?.[0]?.toUpperCase() || '?'}
+                    {conversationInitial(activeConversation)}
                   </span>
                   <span className="font-semibold text-ink dark:text-ink-dark truncate">
-                    {activeUser.name}
+                    {conversationLabel(activeConversation)}
                   </span>
                 </div>
                 <div className="flex items-center gap-1.5 text-xs text-muted flex-shrink-0">
-                  <span className={`w-2 h-2 rounded-full ${status.dot}`} aria-hidden="true" />
-                  {status.label}
+                  {activeConversation.type === 'private' && (
+                    <span
+                      className={`w-2 h-2 rounded-full ${
+                        onlineUserIds.has(activeConversation.otherUser?._id)
+                          ? 'bg-green-500'
+                          : 'bg-gray-400'
+                      }`}
+                      aria-hidden="true"
+                    />
+                  )}
+                  {presenceLabel()}
                 </div>
               </header>
 
@@ -180,7 +450,11 @@ function Chat() {
                   </p>
                 )}
                 {messages.map((msg) => {
-                  const isMine = getSenderId(msg) === user._id;
+                  const senderId = getSenderId(msg);
+                  const isMine = senderId === user._id;
+                  const senderName =
+                    typeof msg.senderId === 'object' ? msg.senderId.name : nameFor(senderId);
+
                   return (
                     <div
                       key={msg.id || msg._id}
@@ -188,6 +462,9 @@ function Chat() {
                         isMine ? 'self-end items-end' : 'self-start items-start'
                       }`}
                     >
+                      {!isMine && activeConversation.type === 'group' && (
+                        <span className="text-[11px] font-medium text-muted px-1">{senderName}</span>
+                      )}
                       <div
                         className={`px-3 py-2 rounded-2xl text-sm break-words ${
                           isMine
@@ -209,6 +486,10 @@ function Chat() {
                 <div ref={messagesEndRef} />
               </div>
 
+              {typingText() && (
+                <div className="px-5 pb-1 text-xs text-muted italic">{typingText()}</div>
+              )}
+
               {error && (
                 <div className="mx-5 mb-2 bg-danger-soft text-danger rounded-lg px-3 py-2 text-xs">
                   {error}
@@ -222,14 +503,14 @@ function Chat() {
                 <input
                   type="text"
                   value={messageInput}
-                  onChange={(e) => setMessageInput(e.target.value)}
+                  onChange={handleInputChange}
                   placeholder="Type a message..."
                   aria-label="Message"
                   className="flex-1 px-3 py-2.5 rounded-lg border border-line dark:border-line-dark bg-page dark:bg-page-dark text-ink dark:text-ink-dark text-sm outline-none focus:border-accent transition-colors"
                 />
                 <button
                   type="submit"
-                  disabled={!messageInput.trim() || socketStatus !== 'connected'}
+                  disabled={!messageInput.trim()}
                   className="px-4 py-2.5 rounded-lg bg-accent text-white text-sm font-semibold hover:opacity-90 disabled:opacity-60 disabled:cursor-not-allowed transition-opacity"
                 >
                   Send

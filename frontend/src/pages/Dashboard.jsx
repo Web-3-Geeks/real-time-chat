@@ -48,18 +48,20 @@ function Dashboard() {
         )}
 
         {!loading &&
-          conversations.map((conv) => (
+          conversations.map((conv) => {
+            const label = conv.type === 'group' ? conv.name : conv.otherUser?.name || 'Unknown user';
+            return (
             <button
               key={conv._id}
-              onClick={() => navigate('/chat', { state: { openUserId: conv.otherUser?._id } })}
+              onClick={() => navigate('/chat', { state: { openConversationId: conv._id } })}
               className="w-full flex items-center gap-3 px-5 py-3 text-left border-b border-line dark:border-line-dark last:border-b-0 hover:bg-page dark:hover:bg-page-dark transition-colors"
             >
               <span className="w-9 h-9 rounded-full bg-nav-active dark:bg-nav-active-dark text-nav-active-ink dark:text-nav-active-ink-dark flex items-center justify-center text-xs font-semibold flex-shrink-0">
-                {conv.otherUser?.name?.[0]?.toUpperCase() || '?'}
+                {label?.[0]?.toUpperCase() || '?'}
               </span>
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium text-ink dark:text-ink-dark truncate">
-                  {conv.otherUser?.name || 'Unknown user'}
+                  {label}
                 </p>
                 <p className="text-xs text-muted truncate">
                   {conv.lastMessage ? conv.lastMessage.content : 'No messages yet'}
@@ -74,7 +76,8 @@ function Dashboard() {
                 </span>
               )}
             </button>
-          ))}
+            );
+          })}
       </div>
     </DashboardLayout>
   );

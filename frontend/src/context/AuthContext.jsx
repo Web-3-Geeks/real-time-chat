@@ -24,8 +24,12 @@ export const AuthProvider = ({ children }) => {
   useEffect(() => {
     const token = localStorage.getItem('token');
     if (token) attachSocket(token);
-
-    return () => disconnectSocket();
+    // No disconnect-on-cleanup here: AuthProvider wraps the whole app and this
+    // effect's cleanup would otherwise fire on React 18 StrictMode's dev-only
+    // mount->cleanup->remount cycle, tearing down and recreating the socket
+    // (a fresh object) out from under any component that already grabbed a
+    // reference to the old one and attached listeners to it. Logout is the
+    // only place that should actually disconnect.
   }, []);
 
   const login = (userData) => {
