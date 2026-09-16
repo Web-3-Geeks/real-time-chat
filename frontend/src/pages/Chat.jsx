@@ -14,7 +14,7 @@ const conversationInitial = (conv) => conversationLabel(conv)?.[0]?.toUpperCase(
 const TYPING_TIMEOUT_MS = 2000;
 
 function Chat() {
-  const { user } = useAuth();
+  const { user, socketStatus } = useAuth();
   const location = useLocation();
 
   const [conversations, setConversations] = useState([]);
@@ -116,7 +116,12 @@ function Chat() {
       socket.off('typing_start', handleTypingStart);
       socket.off('typing_stop', handleTypingStop);
     };
-  }, []);
+    // Re-run once the socket actually exists/reconnects: on a fresh page load
+    // that lands directly on this route, React fires this (child) component's
+    // effects before AuthProvider's (parent) effect that creates the socket,
+    // so getSocket() can still be null on the first pass — this depends on
+    // socketStatus so it retries once AuthContext finishes connecting.
+  }, [socketStatus]);
 
   const stopTypingSignal = (conversationId) => {
     clearTimeout(typingTimeoutRef.current);
