@@ -16,6 +16,16 @@ export const AuthProvider = ({ children }) => {
   const attachSocket = (token) => {
     const socket = connectSocket(token);
 
+    // connectSocket() returns the same cached socket on every call (see its
+    // own StrictMode comment), but attachSocket() itself gets called more
+    // than once for that same socket — e.g. the mount effect below runs
+    // twice under StrictMode. Without this guard each call would pile on
+    // another 'connect'/'disconnect' listener, all firing setSocketStatus
+    // for the same transition (harmless on its own, but exactly the kind of
+    // duplicate-listener bug that shows up elsewhere as doubled messages).
+    if (socket._statusListenersAttached) return;
+    socket._statusListenersAttached = true;
+
     socket.on('connect', () => setSocketStatus('connected'));
     socket.on('disconnect', () => setSocketStatus('disconnected'));
     socket.on('connect_error', () => setSocketStatus('error'));

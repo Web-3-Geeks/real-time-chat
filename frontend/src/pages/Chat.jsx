@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useState, useEffect, useRef, Fragment } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import DashboardLayout from '../components/DashboardLayout';
 import axiosInstance from '../api/axiosInstance';
 import { getSocket } from '../api/socket';
@@ -12,21 +12,31 @@ const conversationLabel = (conv) => (conv.type === 'group' ? conv.name : conv.ot
 const conversationInitial = (conv) => conversationLabel(conv)?.[0]?.toUpperCase() || '?';
 
 const TYPING_TIMEOUT_MS = 2000;
+const MESSAGES_PAGE_SIZE = 30;
+const NEAR_BOTTOM_THRESHOLD = 100;
 
 function Chat() {
   const { user, socketStatus } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
 
   const [conversations, setConversations] = useState([]);
   const [loadingConversations, setLoadingConversations] = useState(true);
   const [activeConversation, setActiveConversation] = useState(null);
   const [messages, setMessages] = useState([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [hasMoreMessages, setHasMoreMessages] = useState(true);
+  const [dividerMessageId, setDividerMessageId] = useState(null);
   const [messageInput, setMessageInput] = useState('');
   const [error, setError] = useState('');
   const [onlineUserIds, setOnlineUserIds] = useState(new Set());
   const [typingUserIds, setTypingUserIds] = useState(new Set());
-  const [unreadIds, setUnreadIds] = useState(new Set());
+  const [showScrollButton, setShowScrollButton] = useState(false);
+  const [toasts, setToasts] = useState([]);
+
+  const [editingMessageId, setEditingMessageId] = useState(null);
+  const [editContent, setEditContent] = useState('');
 
   const [allUsers, setAllUsers] = useState([]);
   const [activeTab, setActiveTab] = useState('private'); // 'private' | 'group'
@@ -36,13 +46,21 @@ function Chat() {
   const [search, setSearch] = useState('');
 
   const messagesEndRef = useRef(null);
+  const messagesContainerRef = useRef(null);
   const activeConversationRef = useRef(null);
+  const conversationsRef = useRef([]);
+  const isNearBottomRef = useRef(true);
+  const prevScrollHeightRef = useRef(0);
   const isTypingRef = useRef(false);
   const typingTimeoutRef = useRef(null);
 
   useEffect(() => {
     activeConversationRef.current = activeConversation;
   }, [activeConversation]);
+
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
 
   useEffect(() => {
     axiosInstance.get('/users').then((res) => setAllUsers(res.data));
@@ -52,8 +70,31 @@ function Chat() {
       .finally(() => setLoadingConversations(false));
   }, []);
 
+  // Ask for browser notification permission once, if the browser supports it
+  // and the user hasn't already answered. The app works fine either way.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  }, []);
+
+  // Keep the message list scrolled correctly: jump to the restored scroll
+  // position after prepending older messages, or auto-scroll to the bottom
+  // for new messages — but only if the user was already near the bottom, so
+  // we don't yank them away while they're reading history.
+  useEffect(() => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+
+    if (prevScrollHeightRef.current > 0) {
+      el.scrollTop = el.scrollHeight - prevScrollHeightRef.current;
+      prevScrollHeightRef.current = 0;
+      return;
+    }
+
+    if (isNearBottomRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
   }, [messages]);
 
   // Global listeners: independent of which conversation is currently open.
@@ -61,30 +102,96 @@ function Chat() {
     const socket = getSocket();
     if (!socket) return;
 
-    const handleReceive = (msg) => {
+    const bumpConversation = (conversationId, patch) => {
       setConversations((prev) => {
-        const idx = prev.findIndex((c) => c._id === msg.conversationId);
-        if (idx === -1) {
-          // Message for a conversation we don't have locally yet — e.g. someone
-          // just started a brand-new chat/group with us. Re-fetch the full list
-          // (with proper otherUser/members/type) instead of dropping the event.
-          axiosInstance.get('/conversations').then((res) => setConversations(res.data));
-          return prev;
-        }
-        const updated = {
-          ...prev[idx],
-          lastMessage: { content: msg.content, createdAt: msg.createdAt },
-          updatedAt: msg.createdAt,
-        };
+        const idx = prev.findIndex((c) => c._id === conversationId);
+        if (idx === -1) return prev;
+        const updated = { ...prev[idx], ...patch(prev[idx]) };
         const rest = prev.filter((_, i) => i !== idx);
         return [updated, ...rest];
       });
+    };
 
-      if (msg.conversationId === activeConversationRef.current?._id) {
-        setMessages((prev) => [...prev, msg]);
-      } else {
-        setUnreadIds((prev) => new Set(prev).add(msg.conversationId));
+    const notify = (conv, msg) => {
+      const senderName =
+        conv?.type === 'group'
+          ? conv.members?.find((m) => m._id === getSenderId(msg))?.name || 'Someone'
+          : conv?.otherUser?.name || 'Someone';
+      const toastId = (msg.id || msg._id)?.toString();
+
+      setToasts((prev) => {
+        if (prev.some((t) => t.id === toastId)) return prev;
+        return [
+          ...prev,
+          {
+            id: toastId,
+            conversationId: msg.conversationId,
+            title: `${senderName} sent you a message`,
+            body: msg.content,
+          },
+        ];
+      });
+      setTimeout(() => {
+        setToasts((prev) => prev.filter((t) => t.id !== toastId));
+      }, 5000);
+
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        const notification = new Notification(`${senderName} sent you a message`, {
+          body: msg.content,
+        });
+        notification.onclick = () => {
+          window.focus();
+          navigate('/chat', { state: { openConversationId: msg.conversationId } });
+          notification.close();
+        };
       }
+    };
+
+    const handleReceive = (msg) => {
+      const isSelf = getSenderId(msg) === user._id;
+      const isActive = msg.conversationId === activeConversationRef.current?._id;
+      const knownConv = conversationsRef.current.find((c) => c._id === msg.conversationId);
+
+      if (!knownConv) {
+        // Message for a conversation we don't have locally yet — e.g. someone
+        // just started a brand-new chat/group with us. Re-fetch the full list
+        // (with proper otherUser/members/type), then notify once we actually
+        // know who it's from — building the toast off the stale local list
+        // here would show "Someone" instead of their name.
+        axiosInstance.get('/conversations').then((res) => {
+          setConversations(res.data);
+          if (!isSelf && !isActive) {
+            const freshConv = res.data.find((c) => c._id === msg.conversationId);
+            notify(freshConv, msg);
+          }
+        });
+      } else {
+        setConversations((prev) => {
+          const idx = prev.findIndex((c) => c._id === msg.conversationId);
+          if (idx === -1) return prev;
+          const updated = {
+            ...prev[idx],
+            lastMessage: { content: msg.content, createdAt: msg.createdAt },
+            updatedAt: msg.createdAt,
+            unreadCount: isSelf ? prev[idx].unreadCount || 0 : (prev[idx].unreadCount || 0) + 1,
+          };
+          const rest = prev.filter((_, i) => i !== idx);
+          return [updated, ...rest];
+        });
+      }
+
+      if (isActive) {
+        setMessages((prev) => {
+          const msgId = (msg.id || msg._id)?.toString();
+          if (prev.some((m) => (m.id || m._id)?.toString() === msgId)) return prev;
+          return [...prev, msg];
+        });
+        socket.emit('mark_messages_read', msg.conversationId);
+        return;
+      }
+
+      if (isSelf || !knownConv) return;
+      notify(knownConv, msg);
     };
 
     const handleOnline = ({ userId }) =>
@@ -111,11 +218,66 @@ function Chat() {
       });
     };
 
+    const patchMessages = (conversationId, messageIds, patch) => {
+      if (conversationId !== activeConversationRef.current?._id) return;
+      const idSet = new Set(messageIds);
+      setMessages((prev) =>
+        prev.map((m) => (idSet.has((m.id || m._id)?.toString()) ? { ...m, ...patch(m) } : m))
+      );
+    };
+
+    const handleDelivered = ({ conversationId, messageIds, userId }) => {
+      patchMessages(conversationId, messageIds, (m) => ({
+        deliveredTo: [...new Set([...(m.deliveredTo || []), userId])],
+      }));
+    };
+
+    const handleRead = ({ conversationId, messageIds, userId }) => {
+      patchMessages(conversationId, messageIds, (m) => ({
+        readBy: [...new Set([...(m.readBy || []), userId])],
+        deliveredTo: [...new Set([...(m.deliveredTo || []), userId])],
+      }));
+      if (userId === user._id) {
+        bumpConversation(conversationId, () => ({ unreadCount: 0 }));
+      }
+    };
+
+    const handleEdited = (updated) => {
+      setMessages((prev) =>
+        prev.map((m) =>
+          (m.id || m._id)?.toString() === updated.id
+            ? { ...m, content: updated.content, edited: true, editedAt: updated.editedAt }
+            : m
+        )
+      );
+    };
+
+    const handleDeleted = (updated) => {
+      setMessages((prev) =>
+        prev.map((m) =>
+          (m.id || m._id)?.toString() === updated.id
+            ? { ...m, content: updated.content, isDeleted: true }
+            : m
+        )
+      );
+    };
+
+    const handleConnect = () => {
+      if (activeConversationRef.current) {
+        socket.emit('join_conversation', activeConversationRef.current._id, () => {});
+      }
+    };
+
     socket.on('receive_message', handleReceive);
     socket.on('user_online', handleOnline);
     socket.on('user_offline', handleOffline);
     socket.on('typing_start', handleTypingStart);
     socket.on('typing_stop', handleTypingStop);
+    socket.on('message_delivered', handleDelivered);
+    socket.on('message_read', handleRead);
+    socket.on('message_edited', handleEdited);
+    socket.on('message_deleted', handleDeleted);
+    socket.on('connect', handleConnect);
 
     return () => {
       socket.off('receive_message', handleReceive);
@@ -123,12 +285,18 @@ function Chat() {
       socket.off('user_offline', handleOffline);
       socket.off('typing_start', handleTypingStart);
       socket.off('typing_stop', handleTypingStop);
+      socket.off('message_delivered', handleDelivered);
+      socket.off('message_read', handleRead);
+      socket.off('message_edited', handleEdited);
+      socket.off('message_deleted', handleDeleted);
+      socket.off('connect', handleConnect);
     };
     // Re-run once the socket actually exists/reconnects: on a fresh page load
     // that lands directly on this route, React fires this (child) component's
     // effects before AuthProvider's (parent) effect that creates the socket,
     // so getSocket() can still be null on the first pass — this depends on
     // socketStatus so it retries once AuthContext finishes connecting.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [socketStatus]);
 
   const stopTypingSignal = (conversationId) => {
@@ -153,15 +321,28 @@ function Chat() {
     setMessages([]);
     setTypingUserIds(new Set());
     setLoadingMessages(true);
-    setUnreadIds((prev) => {
-      const next = new Set(prev);
-      next.delete(conv._id);
-      return next;
-    });
+    setHasMoreMessages(true);
+    setDividerMessageId(null);
+    isNearBottomRef.current = true;
+    setEditingMessageId(null);
+
+    const unreadAtOpen = conv.unreadCount || 0;
+    setConversations((prev) =>
+      prev.map((c) => (c._id === conv._id ? { ...c, unreadCount: 0 } : c))
+    );
 
     try {
-      const { data: history } = await axiosInstance.get(`/conversations/${conv._id}/messages`);
+      const { data: history } = await axiosInstance.get(
+        `/conversations/${conv._id}/messages`,
+        { params: { limit: MESSAGES_PAGE_SIZE } }
+      );
       setMessages(history);
+      setHasMoreMessages(history.length === MESSAGES_PAGE_SIZE);
+
+      if (unreadAtOpen > 0 && history.length >= unreadAtOpen) {
+        const firstUnread = history[history.length - unreadAtOpen];
+        setDividerMessageId((firstUnread?.id || firstUnread?._id)?.toString());
+      }
 
       if (!socket) {
         setError('Not connected to chat server yet. Please wait a moment and try again.');
@@ -174,12 +355,54 @@ function Chat() {
           return;
         }
         setOnlineUserIds((prev) => new Set([...prev, ...(ack.onlineMembers || [])]));
+        socket.emit('mark_messages_read', conv._id);
       });
     } catch {
       setError('Failed to open conversation. Please try again.');
     } finally {
       setLoadingMessages(false);
     }
+  };
+
+  const loadOlderMessages = async () => {
+    if (!activeConversation || loadingOlder || !hasMoreMessages || messages.length === 0) return;
+
+    setLoadingOlder(true);
+    try {
+      const oldest = messages[0];
+      const { data: older } = await axiosInstance.get(
+        `/conversations/${activeConversation._id}/messages`,
+        { params: { limit: MESSAGES_PAGE_SIZE, before: oldest.createdAt } }
+      );
+
+      if (older.length < MESSAGES_PAGE_SIZE) setHasMoreMessages(false);
+
+      if (older.length > 0) {
+        const el = messagesContainerRef.current;
+        prevScrollHeightRef.current = el ? el.scrollHeight : 0;
+        setMessages((prev) => [...older, ...prev]);
+      }
+    } catch {
+      // Leave hasMoreMessages as-is; scrolling up again will just retry.
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
+
+  const handleScroll = () => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    isNearBottomRef.current = distanceFromBottom < NEAR_BOTTOM_THRESHOLD;
+    setShowScrollButton(distanceFromBottom > 200);
+
+    if (el.scrollTop < 60) loadOlderMessages();
+  };
+
+  const scrollToBottom = () => {
+    isNearBottomRef.current = true;
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
   useEffect(() => {
@@ -194,7 +417,7 @@ function Chat() {
     setError('');
     try {
       const { data: conv } = await axiosInstance.post('/conversations', { recipientId: otherUser._id });
-      const fullConv = { ...conv, type: 'private', otherUser, lastMessage: null };
+      const fullConv = { ...conv, type: 'private', otherUser, lastMessage: null, unreadCount: 0 };
       setConversations((prev) => {
         if (prev.some((c) => c._id === fullConv._id)) return prev;
         return [fullConv, ...prev];
@@ -231,7 +454,7 @@ function Chat() {
         { _id: user._id, name: user.name, avatar: user.avatar },
         ...allUsers.filter((u) => groupMemberIds.includes(u._id)),
       ];
-      const fullConv = { ...conv, type: 'group', members, lastMessage: null };
+      const fullConv = { ...conv, type: 'group', members, lastMessage: null, unreadCount: 0 };
       setConversations((prev) => [fullConv, ...prev]);
       setGroupName('');
       setGroupMemberIds([]);
@@ -281,6 +504,43 @@ function Chat() {
       }
     );
     setMessageInput('');
+    isNearBottomRef.current = true;
+  };
+
+  const startEdit = (msg) => {
+    setEditingMessageId((msg.id || msg._id).toString());
+    setEditContent(msg.content);
+  };
+
+  const cancelEdit = () => {
+    setEditingMessageId(null);
+    setEditContent('');
+  };
+
+  const saveEdit = () => {
+    if (!editContent.trim()) return;
+    const socket = getSocket();
+    socket?.emit('edit_message', { messageId: editingMessageId, content: editContent }, (ack) => {
+      if (!ack?.success) setError(ack?.message || 'Failed to edit message');
+    });
+    setEditingMessageId(null);
+    setEditContent('');
+  };
+
+  const handleDeleteMessage = (msg) => {
+    if (!window.confirm('Delete this message?')) return;
+    const socket = getSocket();
+    socket?.emit('delete_message', { messageId: (msg.id || msg._id).toString() }, (ack) => {
+      if (!ack?.success) setError(ack?.message || 'Failed to delete message');
+    });
+  };
+
+  const dismissToast = (id) => setToasts((prev) => prev.filter((t) => t.id !== id));
+
+  const openToastConversation = (toast) => {
+    const conv = conversations.find((c) => c._id === toast.conversationId);
+    if (conv) openConversation(conv);
+    dismissToast(toast.id);
   };
 
   const otherUsers = allUsers.filter((u) => u._id !== user._id);
@@ -292,6 +552,8 @@ function Chat() {
   const filteredConversations = conversations
     .filter((conv) => conv.type === activeTab)
     .filter((conv) => conversationLabel(conv)?.toLowerCase().includes(search.toLowerCase()));
+
+  const totalUnread = conversations.reduce((sum, c) => sum + (c.unreadCount || 0), 0);
 
   const nameFor = (userId) => {
     if (activeConversation?.type === 'group') {
@@ -320,15 +582,61 @@ function Chat() {
     return isOnline ? 'Online' : 'Offline';
   };
 
+  const getMessageStatus = (msg) => {
+    const readBy = msg.readBy || [];
+    const deliveredTo = msg.deliveredTo || [];
+
+    if (activeConversation?.type === 'group') {
+      const otherIds = (activeConversation.members || [])
+        .map((m) => m._id)
+        .filter((id) => id !== user._id);
+      if (otherIds.length === 0) return 'sent';
+      if (otherIds.every((id) => readBy.includes(id))) return 'read';
+      if (otherIds.every((id) => deliveredTo.includes(id))) return 'delivered';
+      return 'sent';
+    }
+
+    const otherId = activeConversation?.otherUser?._id;
+    if (!otherId) return 'sent';
+    if (readBy.includes(otherId)) return 'read';
+    if (deliveredTo.includes(otherId)) return 'delivered';
+    return 'sent';
+  };
+
   return (
     <DashboardLayout>
+      <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 w-72 max-w-[calc(100vw-2rem)]">
+        {toasts.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => openToastConversation(t)}
+            className="text-left bg-surface dark:bg-surface-dark border border-line dark:border-line-dark rounded-lg shadow-lg p-3 relative"
+          >
+            <span
+              onClick={(e) => {
+                e.stopPropagation();
+                dismissToast(t.id);
+              }}
+              role="button"
+              tabIndex={0}
+              aria-label="Dismiss notification"
+              className="absolute top-2 right-2 text-muted text-xs"
+            >
+              ✕
+            </span>
+            <p className="text-sm font-semibold text-ink dark:text-ink-dark pr-4">{t.title}</p>
+            <p className="text-xs text-muted mt-0.5 truncate">{t.body}</p>
+          </button>
+        ))}
+      </div>
+
       <div className="flex h-[calc(100svh-2.5rem)] md:h-[calc(100svh-4rem)] -m-5 md:-m-8 border-t border-line dark:border-line-dark">
         <aside className="w-72 flex-shrink-0 border-r border-line dark:border-line-dark bg-surface dark:bg-surface-dark overflow-y-auto hidden sm:flex sm:flex-col">
           <div className="px-4 pt-4 pb-3 flex items-center justify-between gap-2">
             <h2 className="text-base font-semibold text-ink dark:text-ink-dark">Message</h2>
-            {unreadIds.size > 0 && (
+            {totalUnread > 0 && (
               <span className="text-xs text-accent font-medium">
-                {unreadIds.size} new message{unreadIds.size === 1 ? '' : 's'}
+                {totalUnread} new message{totalUnread === 1 ? '' : 's'}
               </span>
             )}
           </div>
@@ -517,11 +825,13 @@ function Chat() {
                       {conv.lastMessage ? conv.lastMessage.content : 'No messages yet'}
                     </p>
                   </div>
-                  {unreadIds.has(conv._id) && (
+                  {conv.unreadCount > 0 && (
                     <span
-                      className="w-2 h-2 rounded-full bg-accent flex-shrink-0 mt-1.5"
-                      aria-label="Unread message"
-                    />
+                      className="min-w-[18px] h-[18px] px-1 rounded-full bg-accent text-white text-[10px] font-semibold flex items-center justify-center flex-shrink-0 mt-1"
+                      aria-label={`${conv.unreadCount} unread messages`}
+                    >
+                      {conv.unreadCount > 99 ? '99+' : conv.unreadCount}
+                    </span>
                   )}
                 </button>
               );
@@ -529,7 +839,7 @@ function Chat() {
           </div>
         </aside>
 
-        <section className="flex-1 flex flex-col min-w-0">
+        <section className="flex-1 flex flex-col min-w-0 relative">
           {!activeConversation ? (
             <div className="flex-1 flex items-center justify-center text-muted text-sm">
               Select a conversation, or start a new chat/group
@@ -560,7 +870,14 @@ function Chat() {
                 </div>
               </header>
 
-              <div className="flex-1 overflow-y-auto px-5 py-4 flex flex-col gap-2.5">
+              <div
+                ref={messagesContainerRef}
+                onScroll={handleScroll}
+                className="flex-1 overflow-y-auto px-5 py-4 flex flex-col gap-2.5"
+              >
+                {loadingOlder && (
+                  <p className="text-xs text-muted text-center py-1">Loading older messages...</p>
+                )}
                 {loadingMessages && (
                   <p className="text-sm text-muted text-center">Loading messages...</p>
                 )}
@@ -570,41 +887,128 @@ function Chat() {
                   </p>
                 )}
                 {messages.map((msg) => {
+                  const msgId = (msg.id || msg._id)?.toString();
                   const senderId = getSenderId(msg);
                   const isMine = senderId === user._id;
                   const senderName =
                     typeof msg.senderId === 'object' ? msg.senderId.name : nameFor(senderId);
+                  const status = isMine ? getMessageStatus(msg) : null;
+                  const isEditing = editingMessageId === msgId;
 
                   return (
-                    <div
-                      key={msg.id || msg._id}
-                      className={`max-w-[75%] flex flex-col gap-0.5 ${
-                        isMine ? 'self-end items-end' : 'self-start items-start'
-                      }`}
-                    >
-                      {!isMine && activeConversation.type === 'group' && (
-                        <span className="text-[11px] font-medium text-muted px-1">{senderName}</span>
+                    <Fragment key={msgId}>
+                      {dividerMessageId === msgId && (
+                        <div className="flex items-center gap-2 my-1" aria-hidden="true">
+                          <div className="flex-1 h-px bg-line dark:bg-line-dark" />
+                          <span className="text-[11px] text-muted whitespace-nowrap">New Messages</span>
+                          <div className="flex-1 h-px bg-line dark:bg-line-dark" />
+                        </div>
                       )}
                       <div
-                        className={`px-3 py-2 rounded-2xl text-sm break-words ${
-                          isMine
-                            ? 'bg-accent text-white rounded-br-sm'
-                            : 'bg-surface dark:bg-surface-dark border border-line dark:border-line-dark text-ink dark:text-ink-dark rounded-bl-sm'
+                        className={`max-w-[75%] flex flex-col gap-0.5 ${
+                          isMine ? 'self-end items-end' : 'self-start items-start'
                         }`}
                       >
-                        {msg.content}
+                        {!isMine && activeConversation.type === 'group' && (
+                          <span className="text-[11px] font-medium text-muted px-1">{senderName}</span>
+                        )}
+
+                        {isEditing ? (
+                          <div className="flex items-center gap-1.5 w-full">
+                            <input
+                              type="text"
+                              value={editContent}
+                              onChange={(e) => setEditContent(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') saveEdit();
+                                if (e.key === 'Escape') cancelEdit();
+                              }}
+                              autoFocus
+                              className="flex-1 px-2.5 py-1.5 rounded-lg border border-accent bg-page dark:bg-page-dark text-ink dark:text-ink-dark text-sm outline-none"
+                            />
+                            <button
+                              onClick={saveEdit}
+                              aria-label="Save edit"
+                              className="text-xs text-accent font-medium"
+                            >
+                              Save
+                            </button>
+                            <button
+                              onClick={cancelEdit}
+                              aria-label="Cancel edit"
+                              className="text-xs text-muted"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <div
+                            className={`px-3 py-2 rounded-2xl text-sm break-words ${
+                              msg.isDeleted
+                                ? 'italic text-muted border border-line dark:border-line-dark'
+                                : isMine
+                                  ? 'bg-accent text-white rounded-br-sm'
+                                  : 'bg-surface dark:bg-surface-dark border border-line dark:border-line-dark text-ink dark:text-ink-dark rounded-bl-sm'
+                            }`}
+                          >
+                            {msg.content}
+                          </div>
+                        )}
+
+                        <div className="flex items-center gap-1 px-1">
+                          <span className="text-[11px] text-muted">
+                            {new Date(msg.createdAt).toLocaleTimeString([], {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </span>
+                          {msg.edited && !msg.isDeleted && (
+                            <span className="text-[11px] text-muted italic">(edited)</span>
+                          )}
+                          {isMine && !msg.isDeleted && (
+                            <span
+                              className={`text-[11px] ${status === 'read' ? 'text-blue-500' : 'text-muted'}`}
+                              title={status}
+                            >
+                              {status === 'sent' ? '✓' : '✓✓'}
+                            </span>
+                          )}
+                        </div>
+
+                        {isMine && !msg.isDeleted && !isEditing && (
+                          <div className="flex items-center gap-2 px-1">
+                            <button
+                              onClick={() => startEdit(msg)}
+                              className="text-[11px] text-muted hover:text-accent"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => handleDeleteMessage(msg)}
+                              className="text-[11px] text-muted hover:text-danger"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        )}
                       </div>
-                      <span className="text-[11px] text-muted px-1">
-                        {new Date(msg.createdAt).toLocaleTimeString([], {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
-                      </span>
-                    </div>
+                    </Fragment>
                   );
                 })}
                 <div ref={messagesEndRef} />
               </div>
+
+              {showScrollButton && (
+                <button
+                  onClick={scrollToBottom}
+                  aria-label="Scroll to latest messages"
+                  className="absolute bottom-24 right-6 w-9 h-9 rounded-full bg-surface dark:bg-surface-dark border border-line dark:border-line-dark shadow-lg flex items-center justify-center text-ink dark:text-ink-dark"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M12 5v14M5 12l7 7 7-7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>
+              )}
 
               {typingText() && (
                 <div className="px-5 pb-1 text-xs text-muted italic">{typingText()}</div>

@@ -135,6 +135,12 @@ const listConversations = async (req, res) => {
           conversationId: conv._id,
         }).sort({ createdAt: -1 });
 
+        const unreadCount = await Message.countDocuments({
+          conversationId: conv._id,
+          senderId: { $ne: req.user._id },
+          readBy: { $ne: req.user._id },
+        });
+
         const base = {
           _id: conv._id,
           type: conv.type,
@@ -142,6 +148,7 @@ const listConversations = async (req, res) => {
             ? { content: lastMessage.content, createdAt: lastMessage.createdAt }
             : null,
           updatedAt: conv.updatedAt,
+          unreadCount,
         };
 
         if (conv.type === "group") {

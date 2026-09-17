@@ -63,21 +63,15 @@ const initSocket = (httpServer) => {
     safe(async (socket) => {
       console.log(`Socket connected: ${socket.id} (user: ${socket.userId})`);
 
-      await connectDB();
-
+      // Event listeners must be registered synchronously, before any `await`
+      // below. If we awaited connectDB()/catch-up queries first, a client that
+      // emits (e.g. join_conversation) right after connecting could fire before
+      // the server ever attaches a listener for it — Socket.io does not buffer
+      // events for listeners added later, so the emit would be silently lost
+      // and its ack would never come. Registering handlers first, then doing
+      // the slower async setup, closes that race.
       socket.join(socket.userId);
       socket.typingIn = new Set();
-
-      const wasOffline = !onlineUsers.has(socket.userId);
-      if (wasOffline) onlineUsers.set(socket.userId, new Set());
-      onlineUsers.get(socket.userId).add(socket.id);
-
-      if (wasOffline) {
-        const partnerIds = await getConversationPartnerIds(socket.userId);
-        partnerIds.forEach((partnerId) => {
-          io.to(partnerId).emit("user_online", { userId: socket.userId });
-        });
-      }
 
       const stopTyping = (conversationId) => {
         if (!socket.typingIn.has(conversationId)) return;
@@ -167,6 +161,8 @@ const initSocket = (httpServer) => {
             senderId: message.senderId,
             content: message.content,
             createdAt: message.createdAt,
+            edited: false,
+            isDeleted: false,
           };
 
           // Deliver to every member's personal room (joined by userId on connect),
@@ -177,6 +173,138 @@ const initSocket = (httpServer) => {
           );
           memberIds.forEach((memberId) => {
             io.to(memberId.toString()).emit("receive_message", payload);
+          });
+
+          // Anyone else online right now receives it in this same tick, so mark
+          // it delivered to them immediately instead of waiting for a reconnect.
+          const onlineRecipients = memberIds
+            .map((id) => id.toString())
+            .filter((id) => id !== socket.userId && onlineUsers.has(id));
+
+          if (onlineRecipients.length > 0) {
+            await Message.updateOne(
+              { _id: message._id },
+              { $addToSet: { deliveredTo: { $each: onlineRecipients } } },
+            );
+            onlineRecipients.forEach((userId) => {
+              io.to(socket.userId).emit("message_delivered", {
+                conversationId: conversationId.toString(),
+                messageIds: [message._id.toString()],
+                userId,
+              });
+            });
+          }
+
+          if (callback) callback({ success: true, id: message._id });
+        }),
+      );
+
+      socket.on(
+        "mark_messages_read",
+        safe(async (conversationId) => {
+          const isMember = await ConversationMember.findOne({
+            conversationId,
+            userId: socket.userId,
+          });
+          if (!isMember) return;
+
+          const unread = await Message.find({
+            conversationId,
+            senderId: { $ne: socket.userId },
+            readBy: { $ne: socket.userId },
+          });
+
+          if (unread.length === 0) return;
+
+          const messageIds = unread.map((m) => m._id);
+          await Message.updateMany(
+            { _id: { $in: messageIds } },
+            {
+              $addToSet: { readBy: socket.userId, deliveredTo: socket.userId },
+            },
+          );
+
+          const memberIds = await ConversationMember.find({ conversationId }).distinct(
+            "userId",
+          );
+          memberIds.forEach((memberId) => {
+            io.to(memberId.toString()).emit("message_read", {
+              conversationId: conversationId.toString(),
+              messageIds: messageIds.map((id) => id.toString()),
+              userId: socket.userId,
+            });
+          });
+        }),
+      );
+
+      socket.on(
+        "edit_message",
+        safe(async ({ messageId, content }, callback) => {
+          const message = await Message.findById(messageId);
+
+          if (!message || message.senderId.toString() !== socket.userId) {
+            if (callback) callback({ success: false, message: "Not authorized to edit this message" });
+            return;
+          }
+
+          if (message.isDeleted) {
+            if (callback) callback({ success: false, message: "Cannot edit a deleted message" });
+            return;
+          }
+
+          if (!content || !content.trim()) {
+            if (callback) callback({ success: false, message: "Message cannot be empty" });
+            return;
+          }
+
+          message.content = content.trim();
+          message.edited = true;
+          message.editedAt = new Date();
+          await message.save();
+
+          const memberIds = await ConversationMember.find({
+            conversationId: message.conversationId,
+          }).distinct("userId");
+
+          memberIds.forEach((memberId) => {
+            io.to(memberId.toString()).emit("message_edited", {
+              id: message._id.toString(),
+              conversationId: message.conversationId.toString(),
+              content: message.content,
+              edited: true,
+              editedAt: message.editedAt,
+            });
+          });
+
+          if (callback) callback({ success: true });
+        }),
+      );
+
+      socket.on(
+        "delete_message",
+        safe(async ({ messageId }, callback) => {
+          const message = await Message.findById(messageId);
+
+          if (!message || message.senderId.toString() !== socket.userId) {
+            if (callback) callback({ success: false, message: "Not authorized to delete this message" });
+            return;
+          }
+
+          message.isDeleted = true;
+          message.content = "This message was deleted.";
+          await message.save();
+
+          const memberIds = await ConversationMember.find({
+            conversationId: message.conversationId,
+          }).distinct("userId");
+
+          memberIds.forEach((memberId) => {
+            io.to(memberId.toString()).emit("message_deleted", {
+              id: message._id.toString(),
+              conversationId: message.conversationId.toString(),
+              content: message.content,
+              isDeleted: true,
+            });
           });
 
           if (callback) callback({ success: true });
@@ -230,6 +358,62 @@ const initSocket = (httpServer) => {
           }
         }),
       );
+
+      // Slower async setup runs after every listener above is already
+      // attached, so an event the client fires immediately on connect is
+      // never missed (see comment above).
+      await connectDB();
+
+      const wasOffline = !onlineUsers.has(socket.userId);
+      if (wasOffline) onlineUsers.set(socket.userId, new Set());
+      onlineUsers.get(socket.userId).add(socket.id);
+
+      if (wasOffline) {
+        const partnerIds = await getConversationPartnerIds(socket.userId);
+        partnerIds.forEach((partnerId) => {
+          io.to(partnerId).emit("user_online", { userId: socket.userId });
+        });
+      }
+
+      // Catch-up delivery: any message in one of my conversations that I hadn't
+      // received yet (sent while I was offline) counts as delivered now that
+      // I'm connected. Tell each sender which of their messages just landed.
+      const myConversationIds = await ConversationMember.find({
+        userId: socket.userId,
+      }).distinct("conversationId");
+
+      const undelivered = await Message.find({
+        conversationId: { $in: myConversationIds },
+        senderId: { $ne: socket.userId },
+        deliveredTo: { $ne: socket.userId },
+        isDeleted: false,
+      });
+
+      if (undelivered.length > 0) {
+        await Message.updateMany(
+          { _id: { $in: undelivered.map((m) => m._id) } },
+          { $addToSet: { deliveredTo: socket.userId } },
+        );
+
+        const bySender = new Map();
+        undelivered.forEach((m) => {
+          const senderId = m.senderId.toString();
+          const convId = m.conversationId.toString();
+          const key = `${senderId}:${convId}`;
+          if (!bySender.has(key)) {
+            bySender.set(key, { senderId, conversationId: convId, messageIds: [] });
+          }
+          bySender.get(key).messageIds.push(m._id.toString());
+        });
+
+        bySender.forEach(({ senderId, conversationId, messageIds }) => {
+          io.to(senderId).emit("message_delivered", {
+            conversationId,
+            messageIds,
+            userId: socket.userId,
+          });
+        });
+      }
     }),
   );
 

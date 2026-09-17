@@ -21,6 +21,29 @@ const messageSchema = new mongoose.Schema(
             enum: ['text', 'image', 'file'],
             default: 'text'
         },
+        deliveredTo: [
+            {
+                type: mongoose.Schema.Types.ObjectId,
+                ref: 'User',
+            },
+        ],
+        readBy: [
+            {
+                type: mongoose.Schema.Types.ObjectId,
+                ref: 'User',
+            },
+        ],
+        edited: {
+            type: Boolean,
+            default: false,
+        },
+        editedAt: {
+            type: Date,
+        },
+        isDeleted: {
+            type: Boolean,
+            default: false,
+        },
     },
     { timestamps: true }
 )
