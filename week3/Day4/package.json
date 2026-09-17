@@ -1,0 +1,7 @@
+{
+  "name": "real-time-chat-root",
+  "private": true,
+  "scripts": {
+    "start": "npm --prefix backend install && npm --prefix backend start"
+  }
+}
