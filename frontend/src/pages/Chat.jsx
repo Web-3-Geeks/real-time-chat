@@ -307,6 +307,22 @@ function Chat() {
     }
   };
 
+  // Mobile only: the sidebar and the message pane occupy the full width and
+  // toggle based on whether a conversation is open (there's no room to show
+  // both side by side below the `sm` breakpoint) — this is the "back" action
+  // out of a conversation, back to the list. No-op visually at `sm` and up,
+  // where both panes are already shown together.
+  const closeActiveConversation = () => {
+    if (activeConversation) {
+      stopTypingSignal(activeConversation._id);
+      getSocket()?.emit('leave_conversation', activeConversation._id);
+    }
+    setActiveConversation(null);
+    setMessages([]);
+    setTypingUserIds(new Set());
+    setEditingMessageId(null);
+  };
+
   const openConversation = async (conv) => {
     setError('');
     const socket = getSocket();
@@ -648,7 +664,11 @@ function Chat() {
       </div>
 
       <div className="flex h-[calc(100svh-2.5rem)] md:h-[calc(100svh-4rem)] -m-5 md:-m-8 border-t border-line dark:border-line-dark">
-        <aside className="w-72 flex-shrink-0 border-r border-line dark:border-line-dark bg-surface dark:bg-surface-dark overflow-y-auto hidden sm:flex sm:flex-col">
+        <aside
+          className={`w-full sm:w-72 flex-shrink-0 border-r border-line dark:border-line-dark bg-surface dark:bg-surface-dark overflow-y-auto sm:flex sm:flex-col ${
+            activeConversation ? 'hidden' : 'flex flex-col'
+          }`}
+        >
           <div className="px-4 pt-4 pb-3 flex items-center justify-between gap-2">
             <h2 className="text-base font-semibold text-ink dark:text-ink-dark">Message</h2>
             {totalUnread > 0 && (
@@ -877,7 +897,9 @@ function Chat() {
           </div>
         </aside>
 
-        <section className="flex-1 flex flex-col min-w-0 relative">
+        <section
+          className={`flex-1 flex-col min-w-0 relative sm:flex ${activeConversation ? 'flex' : 'hidden sm:flex'}`}
+        >
           {!activeConversation ? (
             <div className="flex-1 flex items-center justify-center text-muted text-sm">
               Select a conversation, or start a new chat/group
@@ -886,6 +908,15 @@ function Chat() {
             <>
               <header className="flex items-center justify-between gap-3 px-5 py-3 border-b border-line dark:border-line-dark bg-surface dark:bg-surface-dark">
                 <div className="flex items-center gap-2.5 min-w-0">
+                  <button
+                    onClick={closeActiveConversation}
+                    aria-label="Back to conversations"
+                    className="sm:hidden -ml-1 p-1 text-ink dark:text-ink-dark flex-shrink-0"
+                  >
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <path d="M15 18l-6-6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </button>
                   <span className="w-8 h-8 rounded-full bg-nav-active dark:bg-nav-active-dark text-nav-active-ink dark:text-nav-active-ink-dark flex items-center justify-center text-xs font-semibold flex-shrink-0">
                     {conversationInitial(activeConversation)}
                   </span>

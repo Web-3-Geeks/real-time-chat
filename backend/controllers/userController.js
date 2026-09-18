@@ -25,7 +25,7 @@ const updateProfile = async (req, res) => {
     if (avatar) updates.avatar = avatar;
 
     const updatedUser = await User.findByIdAndUpdate(req.user._id, updates, {
-        new: true,
+        returnDocument: 'after',
     }).select('-password');
 
     res.status(200).json(updatedUser);
