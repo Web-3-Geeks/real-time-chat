@@ -2,6 +2,36 @@
 
 A full-stack real-time chat application built incrementally as part of a Netixol internship project. Built with React (Vite + Tailwind CSS) on the frontend and Node.js/Express + Socket.io + MongoDB on the backend.
 
+## Features
+
+- **Authentication:** JWT-based register/login, password hashing with bcrypt, protected routes and protected Socket.io connections.
+- **Private (1:1) conversations** and **group conversations** (create, name, add multiple members).
+- **Real-time messaging** over Socket.io, delivered to every member instantly — no page refresh needed.
+- **Online/offline presence**, aware of multiple tabs/devices per user.
+- **Typing indicators** ("X is typing...", "X and Y are typing...", debounced).
+- **Message delivery & read receipts** with sent / delivered / read status ticks.
+- **Persistent unread message counts** per conversation, shown as a sidebar badge.
+- **Message editing and deletion** (owner-only, enforced server-side), with an "(edited)" tag and a soft-delete placeholder.
+- **Real-time in-app notifications** (toast) and **browser notifications** (with graceful fallback if permission is denied), deduplicated.
+- **Message pagination / infinite scroll**, loading older history on demand with scroll position preserved.
+- **Socket reconnection handling** with a visible connection status (Connecting / Reconnecting / Offline / error) and automatic rejoin of the active conversation.
+- **Responsive UI** usable on desktop, tablet, and mobile (a dedicated list ↔ chat view toggle on small screens).
+
+## Screenshots
+
+| | |
+|---|---|
+| Register | ![Register](docs/screenshots/01-register.png) |
+| Login | ![Login](docs/screenshots/02-login.png) |
+| Dashboard | ![Dashboard](docs/screenshots/03-dashboard.png) |
+| Private chat with read receipts | ![Private chat](docs/screenshots/04-private-chat.png) |
+| Editing a message | ![Edit message](docs/screenshots/05-edit-message.png) |
+| In-app toast notification | ![Toast notification](docs/screenshots/06-notification-toast.png) |
+| Unread badge (after refresh) | ![Unread badge](docs/screenshots/07-unread-badge.png) |
+| Group conversation | ![Group chat](docs/screenshots/08-group-chat.png) |
+| Mobile — conversation list | ![Mobile list](docs/screenshots/09-mobile-conversation-list.png) |
+| Mobile — chat view (with back button) | ![Mobile chat](docs/screenshots/10-mobile-chat-view.png) |
+
 ## Tech Stack
 
 - **Frontend:** React (Vite), Tailwind CSS, React Router, Axios, Socket.io Client
@@ -103,15 +133,41 @@ The Socket.io connection is authenticated using the same JWT as the REST API, pa
 | `delete_message` | Client → Server | `{ messageId }`, ack callback | Owner-only; soft-deletes (`isDeleted: true`, content replaced with a placeholder) rather than removing the document |
 | `message_deleted` | Server → Client | `{ id, conversationId, content, isDeleted }` | Broadcast to every member on a successful delete |
 
-### Testing Socket.io / real-time messaging
+## Testing
+
+See [`docs/TESTING_RESULTS.md`](docs/TESTING_RESULTS.md) for the final acceptance-criteria checklist and results (what was tested, how, and the outcome — including what was explicitly *not* individually exercised).
+
+### REST API — Postman collection
+
+`postman-collection.json` covers the full REST surface (auth, users, conversations/messages), organized into **Health / Auth / Users / Conversations & Messages** folders. Every request has an automated `pm.test()` assertion, and collection variables (`tokenA`, `userIdB`, `conversationId`, etc.) are captured automatically as you run requests top-to-bottom, so later requests don't need manual copy-pasting of ids/tokens.
+
+Import it into Postman, set `baseUrl` if not testing against `http://localhost:5000/api`, and run **Auth > Register User A/B/C/D** first (in that order) — everything else depends on the tokens/ids those capture. The collection also includes a `[Negative]` -prefixed request for every validation rule (missing/invalid fields, wrong credentials, missing/bad auth, invalid ids, unauthorized access, etc.), so running the whole collection top-to-bottom doubles as a regression check.
+
+### Socket.io / real-time messaging — manual multi-user walkthrough
+
+Socket.io events aren't testable through Postman, so exercise them through the actual UI with multiple simultaneous sessions:
 
 1. Run the backend and frontend locally (or use the deployed URLs).
-2. Register two different user accounts.
-3. Open the app in two separate browser sessions (e.g., one normal window and one incognito window, or two different browsers) — one per user.
-4. Log in as a different user in each, go to **Chats**, and select the other user from the list.
-5. Send a message from one tab — it should appear in the other tab immediately, without a page refresh. Refreshing either tab should reload the same message history from the database.
+2. Register three different user accounts (A, B, C) — three lets you exercise a group conversation properly, not just 1:1.
+3. Open the app in three separate browser sessions (e.g., one normal window, one incognito window, and a different browser) — one per user, so each has its own token/socket.
+4. **Private chat:** log in as A and B, start a conversation, send messages back and forth — each should appear in the other tab immediately, with the status tick progressing ✓ (sent) → ✓✓ grey (delivered) → ✓✓ blue (read) once the recipient opens the conversation.
+5. **Edit/delete:** as the sender, edit a message (see the "(edited)" tag appear for both users) and delete one (see it replace with the deleted-message placeholder for both users). Confirm the *other* user cannot edit/delete your message (no Edit/Delete buttons show on messages that aren't theirs).
+6. **Group chat:** as A, create a group with B and C, send a message, and confirm it reaches both B and C in real time.
+7. **Presence & typing:** watch the green/grey online dot update as a user closes their tab; start typing in one session and confirm "X is typing..." appears for the others (and clears after a pause or on send).
+8. **Unread counts & notifications:** with B's conversation with A *not* open, send a message from A — B should see an in-app toast and a numeric unread badge in the sidebar, both clearing once B opens the conversation.
+9. **Refresh persistence:** refresh any tab mid-conversation — the same message history, read state, and unread counts should reload from the database, not reset.
+10. **Reconnection:** stop and restart the backend (or use dev tools to go offline/online) while a tab is connected — the sidebar should show a "Reconnecting..." / "Offline" status, then clear and resume working once the connection is back, without needing a manual refresh.
+11. **Unauthorized access:** with a 4th user who was never added to A/B's conversation, confirm `GET /api/conversations/:id/messages` returns `403` for that conversation (covered by the Postman collection's `[Negative] Get messages - non-member forbidden` request) — the same rule Socket.io's `join_conversation`/`send_message`/etc. enforce for the real-time side.
 
-The Postman collection (`postman-collection.json`) covers the REST auth/user endpoints; Socket.io events are tested via the UI as described above rather than through Postman.
+### Automated checks run during development
+
+This project's own development relied on scripted checks rather than only manual clicking — useful as a reference if you want to write your own:
+
+- A raw `socket.io-client` Node script exercising delivery, read receipts, edit/delete ownership, unread counts, and pagination directly against the backend (no browser needed) — fast enough to run after every backend change.
+- Playwright scripts driving two simultaneous browser sessions through the full private-chat flow (send, edit, delete, notifications, unread badges) and a mobile-viewport pass checking the list ↔ chat toggle described above.
+- A plain HTTP script replaying every request/assertion in the Postman collection, used to verify the collection itself before committing it.
+
+These aren't checked into the repo (they were throwaway scripts run against a local instance during development, not a maintained test suite), but the patterns above are straightforward to reproduce with `socket.io-client` and `playwright` if you want an automated regression check.
 
 ## Week 3 — Day 1: Project Setup, Database Design & Authentication
 
