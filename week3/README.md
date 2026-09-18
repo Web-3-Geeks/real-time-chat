@@ -6,6 +6,7 @@ Each `DayN/` folder is a complete, standalone copy of the project exactly as it 
 - **Day2/** — Socket.io integration (authenticated connections, conversation rooms, real-time send/receive messaging), conversation create/list/message-history APIs, and the Chat UI (user list, message thread, connection status indicator). Backend moved from Vercel to Railway since Socket.io needs a persistent server.
 - **Day3/** — Group conversations, online/offline presence (multi-tab aware), typing indicators, unread-message indicator, password show/hide toggle, and a reworked Chat UI with a real conversation list and group/chat creation panels.
 - **Day4/** — Message delivery/read receipts with status ticks, owner-only message editing and soft-delete, in-app + browser notifications (deduped), persistent unread counts, and paginated/infinite-scroll message history with scroll position preservation.
+- **Day5/** — Final integration pass: visible connection status (Connecting/Reconnecting/Offline), a message-loss race fix (join room before fetching history), ObjectId validation on every socket/REST input, a centralized 404/error handler, removed error-message leaks from API responses, and new DB indexes for message/membership queries.
 
 ## archive/
 
