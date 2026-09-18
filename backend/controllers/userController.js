@@ -11,7 +11,8 @@ const listUsers = async (req, res) => {
     const users = await User.find({ _id: { $ne: req.user._id } }).select('-password');
     res.status(200).json(users);
   } catch (error) {
-    res.status(500).json({ message: 'Server error', error: error.message });
+    console.error('listUsers error:', error.message);
+    res.status(500).json({ message: 'Server error' });
   }
 };
 
@@ -29,7 +30,8 @@ const updateProfile = async (req, res) => {
 
     res.status(200).json(updatedUser);
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    console.error('updateProfile error:', error.message);
+    res.status(500).json({ message: "Server error" });
   }
 };
 

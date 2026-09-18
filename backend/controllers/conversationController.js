@@ -1,7 +1,10 @@
+const mongoose = require("mongoose");
 const Conversation = require("../models/Conversation");
 const ConversationMember = require("../models/ConversationMember");
 const Message = require("../models/Message");
 const User = require("../models/User");
+
+const isValidId = (id) => typeof id === "string" && mongoose.Types.ObjectId.isValid(id);
 
 const createOrGetConversation = async (req, res) => {
   try {
@@ -13,6 +16,10 @@ const createOrGetConversation = async (req, res) => {
 
     if (!recipientId) {
       return res.status(400).json({ message: "recipientId is required" });
+    }
+
+    if (!isValidId(recipientId)) {
+      return res.status(400).json({ message: "Invalid recipientId" });
     }
 
     if (recipientId === req.user._id.toString()) {
@@ -41,7 +48,8 @@ const createOrGetConversation = async (req, res) => {
 
     res.status(200).json(conversation);
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    console.error("createOrGetConversation error:", error.message);
+    res.status(500).json({ message: "Server error" });
   }
 };
 
@@ -61,6 +69,10 @@ const createGroupConversation = async (req, res) => {
 
     if (uniqueMemberIds.length !== memberIds.length) {
       return res.status(400).json({ message: "Duplicate members are not allowed" });
+    }
+
+    if (!uniqueMemberIds.every(isValidId)) {
+      return res.status(400).json({ message: "One or more member ids are invalid" });
     }
 
     if (uniqueMemberIds.includes(req.user._id.toString())) {
@@ -83,6 +95,7 @@ const createGroupConversation = async (req, res) => {
 
     res.status(201).json(conversation);
   } catch (error) {
+    console.error("createGroupConversation error:", error.message);
     res.status(500).json({ message: "Server error" });
   }
 };
@@ -91,6 +104,10 @@ const getMessages = async (req, res) => {
   try {
     const { conversationId } = req.params;
     const { limit = 50, before } = req.query;
+
+    if (!isValidId(conversationId)) {
+      return res.status(400).json({ message: "Invalid conversation id" });
+    }
 
     const isMember = await ConversationMember.findOne({
       conversationId,
@@ -115,7 +132,8 @@ const getMessages = async (req, res) => {
 
     res.status(200).json(messages.reverse());
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    console.error("getMessages error:", error.message);
+    res.status(500).json({ message: "Server error" });
   }
 };
 
@@ -177,7 +195,8 @@ const listConversations = async (req, res) => {
 
     res.status(200).json(results);
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    console.error("listConversations error:", error.message);
+    res.status(500).json({ message: "Server error" });
   }
 };
 

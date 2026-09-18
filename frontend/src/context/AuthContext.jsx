@@ -29,6 +29,12 @@ export const AuthProvider = ({ children }) => {
     socket.on('connect', () => setSocketStatus('connected'));
     socket.on('disconnect', () => setSocketStatus('disconnected'));
     socket.on('connect_error', () => setSocketStatus('error'));
+    // socket.io-client retries automatically after a drop (network blip,
+    // server restart) — these fire on the underlying Manager, not the
+    // socket itself, and are what let the UI show "Reconnecting..."
+    // distinctly from a first-time "Connecting...".
+    socket.io.on('reconnect_attempt', () => setSocketStatus('reconnecting'));
+    socket.io.on('reconnect_failed', () => setSocketStatus('error'));
   };
 
   useEffect(() => {

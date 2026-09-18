@@ -1,5 +1,7 @@
 const mongoose = require('mongoose');
 const Conversation = require('../models/Conversation');
+const ConversationMember = require('../models/ConversationMember');
+const Message = require('../models/Message');
 
 let isConnected = false;
 
@@ -19,6 +21,16 @@ const connectDB = async () => {
             socketTimeoutMS: 20000,
         });
         await Conversation.syncIndexes();
+        try {
+            // Separate try/catch: if pre-existing data ever violated the new
+            // unique {conversationId, userId} index, this would throw — that
+            // should just skip the (unlikely, already-consistent-in-practice)
+            // index build, never take down the whole DB connection.
+            await ConversationMember.syncIndexes();
+            await Message.syncIndexes();
+        } catch (indexError) {
+            console.error('Index sync failed (non-fatal):', indexError.message);
+        }
         isConnected = true;
         console.log('MongoDB connected');
     } catch (error) {

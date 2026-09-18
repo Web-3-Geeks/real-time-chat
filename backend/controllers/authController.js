@@ -45,7 +45,8 @@ const registerUser = async (req, res) => {
       token,
     });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    console.error("registerUser error:", error.message);
+    res.status(500).json({ message: "Server error" });
   }
 };
 
@@ -77,7 +78,8 @@ const loginUser = async (req, res) => {
         token
     })
     } catch (error) {
-        res.status(500).json({ message: 'Server error', error: error.message });
+        console.error('loginUser error:', error.message);
+        res.status(500).json({ message: 'Server error' });
     }
 }
 

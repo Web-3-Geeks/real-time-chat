@@ -1,8 +1,14 @@
 const { Server } = require("socket.io");
 const jwt = require("jsonwebtoken");
+const mongoose = require("mongoose");
 const ConversationMember = require("../models/ConversationMember");
 const Message = require("../models/Message");
 const connectDB = require("../config/db");
+
+// A malformed id (not a valid ObjectId) would otherwise reach Mongoose and
+// throw a CastError — safe() stops that from crashing the process, but every
+// caller still deserves a clean rejection instead of a generic "Server error".
+const isValidId = (id) => typeof id === "string" && mongoose.Types.ObjectId.isValid(id);
 
 // userId (string) -> Set of socket ids. Lets one user have multiple tabs/devices
 // open at once without flipping online/offline on every single connect/disconnect.
@@ -85,6 +91,11 @@ const initSocket = (httpServer) => {
       socket.on(
         "join_conversation",
         safe(async (conversationId, callback) => {
+          if (!isValidId(conversationId)) {
+            if (callback) callback({ success: false, message: "Invalid conversation id" });
+            return;
+          }
+
           const isMember = await ConversationMember.findOne({
             conversationId,
             userId: socket.userId,
@@ -121,6 +132,7 @@ const initSocket = (httpServer) => {
       socket.on(
         "leave_conversation",
         safe(async (conversationId) => {
+          if (!isValidId(conversationId)) return;
           socket.leave(conversationId);
           stopTyping(conversationId);
           console.log(`User ${socket.userId} left conversation ${conversationId}`);
@@ -130,7 +142,12 @@ const initSocket = (httpServer) => {
       socket.on(
         "send_message",
         safe(async (data, callback) => {
-          const { conversationId, content } = data;
+          const { conversationId, content } = data || {};
+
+          if (!isValidId(conversationId)) {
+            if (callback) callback({ success: false, message: "Invalid conversation id" });
+            return;
+          }
 
           const isMember = await ConversationMember.findOne({
             conversationId,
@@ -144,6 +161,11 @@ const initSocket = (httpServer) => {
 
           if (!content || !content.trim()) {
             if (callback) callback({ success: false, message: "Message cannot be empty" });
+            return;
+          }
+
+          if (content.length > 5000) {
+            if (callback) callback({ success: false, message: "Message is too long (max 5000 characters)" });
             return;
           }
 
@@ -202,6 +224,8 @@ const initSocket = (httpServer) => {
       socket.on(
         "mark_messages_read",
         safe(async (conversationId) => {
+          if (!isValidId(conversationId)) return;
+
           const isMember = await ConversationMember.findOne({
             conversationId,
             userId: socket.userId,
@@ -239,7 +263,17 @@ const initSocket = (httpServer) => {
 
       socket.on(
         "edit_message",
-        safe(async ({ messageId, content }, callback) => {
+        safe(async ({ messageId, content } = {}, callback) => {
+          if (!isValidId(messageId)) {
+            if (callback) callback({ success: false, message: "Invalid message id" });
+            return;
+          }
+
+          if (content && content.length > 5000) {
+            if (callback) callback({ success: false, message: "Message is too long (max 5000 characters)" });
+            return;
+          }
+
           const message = await Message.findById(messageId);
 
           if (!message || message.senderId.toString() !== socket.userId) {
@@ -282,7 +316,12 @@ const initSocket = (httpServer) => {
 
       socket.on(
         "delete_message",
-        safe(async ({ messageId }, callback) => {
+        safe(async ({ messageId } = {}, callback) => {
+          if (!isValidId(messageId)) {
+            if (callback) callback({ success: false, message: "Invalid message id" });
+            return;
+          }
+
           const message = await Message.findById(messageId);
 
           if (!message || message.senderId.toString() !== socket.userId) {
@@ -314,6 +353,8 @@ const initSocket = (httpServer) => {
       socket.on(
         "typing_start",
         safe(async (conversationId) => {
+          if (!isValidId(conversationId)) return;
+
           const isMember = await ConversationMember.findOne({
             conversationId,
             userId: socket.userId,
@@ -333,6 +374,7 @@ const initSocket = (httpServer) => {
       socket.on(
         "typing_stop",
         safe(async (conversationId) => {
+          if (!isValidId(conversationId)) return;
           stopTyping(conversationId);
         }),
       );

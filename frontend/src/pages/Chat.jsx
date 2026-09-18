@@ -331,12 +331,41 @@ function Chat() {
       prev.map((c) => (c._id === conv._id ? { ...c, unreadCount: 0 } : c))
     );
 
+    if (!socket) {
+      setError('Not connected to chat server yet. Please wait a moment and try again.');
+      setLoadingMessages(false);
+      return;
+    }
+
     try {
+      // Join the room *before* fetching history: a message sent in the gap
+      // between the two can't be in the history we're about to ask for (it
+      // hadn't happened yet), and if we joined after fetching we wouldn't be
+      // in the room yet to receive it live either — it would simply be lost
+      // until the conversation was reopened or the page refreshed.
+      const joinAck = await new Promise((resolve) => {
+        socket.emit('join_conversation', conv._id, resolve);
+      });
+
+      if (!joinAck?.success) {
+        setError(joinAck?.message || 'Could not join conversation');
+        return;
+      }
+      setOnlineUserIds((prev) => new Set([...prev, ...(joinAck.onlineMembers || [])]));
+
       const { data: history } = await axiosInstance.get(
         `/conversations/${conv._id}/messages`,
         { params: { limit: MESSAGES_PAGE_SIZE } }
       );
-      setMessages(history);
+
+      // Merge rather than overwrite: a message may have already arrived live
+      // (and been appended to `messages`) in the gap while this fetch was in
+      // flight. Dedupe by id so it isn't lost or duplicated.
+      setMessages((prev) => {
+        const historyIds = new Set(history.map((h) => (h.id || h._id)?.toString()));
+        const liveExtra = prev.filter((m) => !historyIds.has((m.id || m._id)?.toString()));
+        return [...history, ...liveExtra];
+      });
       setHasMoreMessages(history.length === MESSAGES_PAGE_SIZE);
 
       if (unreadAtOpen > 0 && history.length >= unreadAtOpen) {
@@ -344,19 +373,7 @@ function Chat() {
         setDividerMessageId((firstUnread?.id || firstUnread?._id)?.toString());
       }
 
-      if (!socket) {
-        setError('Not connected to chat server yet. Please wait a moment and try again.');
-        return;
-      }
-
-      socket.emit('join_conversation', conv._id, (ack) => {
-        if (!ack?.success) {
-          setError(ack?.message || 'Could not join conversation');
-          return;
-        }
-        setOnlineUserIds((prev) => new Set([...prev, ...(ack.onlineMembers || [])]));
-        socket.emit('mark_messages_read', conv._id);
-      });
+      socket.emit('mark_messages_read', conv._id);
     } catch {
       setError('Failed to open conversation. Please try again.');
     } finally {
@@ -641,6 +658,27 @@ function Chat() {
             )}
           </div>
 
+          {socketStatus !== 'connected' && (
+            <div
+              className={`mx-4 mb-3 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 ${
+                socketStatus === 'error'
+                  ? 'bg-danger-soft text-danger'
+                  : 'bg-accent-soft text-accent'
+              }`}
+            >
+              <span
+                className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                  socketStatus === 'error' ? 'bg-danger' : 'bg-accent animate-pulse'
+                }`}
+                aria-hidden="true"
+              />
+              {socketStatus === 'connecting' && 'Connecting...'}
+              {socketStatus === 'reconnecting' && 'Reconnecting...'}
+              {socketStatus === 'disconnected' && 'Offline — trying to reconnect...'}
+              {socketStatus === 'error' && 'Connection error'}
+            </div>
+          )}
+
           <div className="px-4 pb-3">
             <div className="relative">
               <svg
@@ -919,6 +957,7 @@ function Chat() {
                               type="text"
                               value={editContent}
                               onChange={(e) => setEditContent(e.target.value)}
+                              maxLength={5000}
                               onKeyDown={(e) => {
                                 if (e.key === 'Enter') saveEdit();
                                 if (e.key === 'Escape') cancelEdit();
@@ -1030,6 +1069,7 @@ function Chat() {
                   onChange={handleInputChange}
                   placeholder="Type a message..."
                   aria-label="Message"
+                  maxLength={5000}
                   className="flex-1 px-3 py-2.5 rounded-lg border border-line dark:border-line-dark bg-page dark:bg-page-dark text-ink dark:text-ink-dark text-sm outline-none focus:border-accent transition-colors"
                 />
                 <button

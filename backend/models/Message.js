@@ -14,7 +14,8 @@ const messageSchema = new mongoose.Schema(
         },
         content: {
             type: String,
-            required: true
+            required: true,
+            maxlength: 5000,
         },
         messageType: {
             type: String,
@@ -47,5 +48,11 @@ const messageSchema = new mongoose.Schema(
     },
     { timestamps: true }
 )
+
+// Every message query filters by conversationId and sorts/pages by
+// createdAt (history fetch, cursor-based `before` pagination, unread
+// counts) — this compound index covers all of them instead of falling
+// back to a full collection scan as message volume grows.
+messageSchema.index({ conversationId: 1, createdAt: -1 });
 
 module.exports = mongoose.model('Message', messageSchema);
