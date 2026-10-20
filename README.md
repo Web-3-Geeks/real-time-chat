@@ -16,6 +16,11 @@ A full-stack real-time chat application built incrementally as part of a Netixol
 - **Message pagination / infinite scroll**, loading older history on demand with scroll position preserved.
 - **Socket reconnection handling** with a visible connection status (Connecting / Reconnecting / Offline / error) and automatic rejoin of the active conversation.
 - **Responsive UI** usable on desktop, tablet, and mobile (a dedicated list ↔ chat view toggle on small screens).
+- **Reply to a message** with a quoted preview; clicking the quote jumps to (and highlights) the original.
+- **Emoji reactions** (👍 ❤️ 😂 😮 😢 🙏) — one per user, toggled live for everyone in the conversation.
+- **Photo sharing** with optional caption: pick, paste or drag-and-drop an image; it is resized in the browser, stored in MongoDB (no external storage service needed) and opens in a full-screen viewer.
+- **Group administration:** rename, add/remove members, promote/demote admins, leave group — with "Ali added Sara"-style system messages in the history.
+- **Day / night theme toggle** (remembered per browser), favorites, emoji picker, voice typing, and per-tab conversation filters (All / Unread / Favorites / Direct / Groups).
 
 ## Screenshots
 
@@ -77,6 +82,15 @@ npm run dev
 
 Backend runs on `http://localhost:5000` (REST API and Socket.io on the same server/port).
 
+#### Demo data (optional)
+
+```bash
+npm run seed            # create demo users, chats and groups
+npm run seed -- --reset # delete the previous demo data and re-create it
+```
+
+Creates 9 users (Anna Johnson, Brian Carter, Clara Smith, David Brown, Emily Davis, Henry Moore, Isabella Taylor, Rachel Green, Steve Evans), 4 private chats and 3 groups ("Design Team", "Weekend Trip", "Marketing Squad") with messages, replies, reactions and some unread messages. Log in as `firstname.lastname@demo.com` with password `Password123` (e.g. `anna.johnson@demo.com`). The script only touches `@demo.com` accounts and conversations made up entirely of them, so it's safe to run against a database with real users.
+
 ### Frontend
 
 ```bash
@@ -110,6 +124,13 @@ Frontend runs on `http://localhost:5173`.
 | PATCH | `/api/users/me` | Yes | Update `name` and/or `avatar` |
 | POST | `/api/conversations` | Yes | Find/create a private conversation (`recipientId`), or create a group (`type: "group"`, `name`, `memberIds`: at least 2 other users, no duplicates, all must exist) |
 | GET | `/api/conversations` | Yes | List the authenticated user's conversations (private and group), each with members/other-user info and last message |
+| PATCH | `/api/conversations/:conversationId` | Yes (group admin) | Rename a group (`name`, 1–100 chars) |
+| POST | `/api/conversations/:conversationId/members` | Yes (group admin) | Add members (`memberIds`) |
+| DELETE | `/api/conversations/:conversationId/members/:userId` | Yes (group admin) | Remove a member (admins leave via `/leave` instead) |
+| PATCH | `/api/conversations/:conversationId/members/:userId` | Yes (group admin) | Set `role` to `"admin"` or `"member"` (a group always keeps at least one admin) |
+| POST | `/api/conversations/:conversationId/leave` | Yes (member) | Leave a group; if the last admin leaves, the longest-standing member becomes admin; an empty group is deleted |
+| POST | `/api/attachments` | Yes | Upload an image as the raw request body (`Content-Type: image/jpeg|png|webp|gif`, max 5MB, file signature checked). Returns `{ key }` |
+| GET | `/api/attachments/:key` | No (unguessable 48-char key) | Download an uploaded image |
 | GET | `/api/conversations/:conversationId/messages` | Yes | Get message history for a conversation (chronological, paginated via `limit`/`before`); `GET /api/conversations` also returns a per-conversation `unreadCount` |
 
 Protected routes require an `Authorization: Bearer <token>` header.
@@ -122,7 +143,7 @@ The Socket.io connection is authenticated using the same JWT as the REST API, pa
 |---|---|---|---|
 | `join_conversation` | Client → Server | `conversationId`, ack callback | Verifies membership, joins the Socket.io room for that conversation. Ack includes `onlineMembers` (user IDs currently online) so the UI has presence info immediately |
 | `leave_conversation` | Client → Server | `conversationId` | Leaves the room, stops any typing indicator the user had active there |
-| `send_message` | Client → Server | `{ conversationId, content }`, ack callback | Validates membership + content, saves the message, delivers it to every member (see note below) |
+| `send_message` | Client → Server | `{ conversationId, content, replyTo?, attachmentKey? }`, ack callback | Validates membership + content, saves the message, delivers it to every member (see note below) |
 | `receive_message` | Server → Client | `{ id, conversationId, senderId, content, createdAt }` | Delivered to every conversation member's personal room (joined by `userId` on connect) — including the sender, and including members who don't currently have this conversation open (so an unread indicator can be shown) |
 | `user_online` / `user_offline` | Server → Client | `{ userId }` | Sent to everyone who shares a conversation with that user, when their first socket connects / last socket disconnects (multiple tabs/devices count as one presence) |
 | `typing_start` / `typing_stop` | Client ↔ Server | `conversationId` (in), `{ conversationId, userId }` (out) | Client emits on typing/pause/send/leave; server verifies membership and re-broadcasts to the conversation room only (`socket.to(...)`, so the typer never gets their own event back) |
@@ -132,6 +153,12 @@ The Socket.io connection is authenticated using the same JWT as the REST API, pa
 | `message_edited` | Server → Client | `{ id, conversationId, content, edited, editedAt }` | Broadcast to every member on a successful edit |
 | `delete_message` | Client → Server | `{ messageId }`, ack callback | Owner-only; soft-deletes (`isDeleted: true`, content replaced with a placeholder) rather than removing the document |
 | `message_deleted` | Server → Client | `{ id, conversationId, content, isDeleted }` | Broadcast to every member on a successful delete |
+| `react_message` | Client → Server | `{ messageId, emoji }`, ack callback | Member-only; emoji must be one of the allowed six. Same emoji again removes the reaction, a different one replaces it (one per user). Not allowed on deleted or system messages |
+| `message_reacted` | Server → Client | `{ id, conversationId, reactions: [{ emoji, userId }] }` | Broadcast to every member when a message's reactions change |
+| `conversation_updated` | Server → Client | `{ _id, type, name, members, admins }` | Sent to every current member when a group is renamed or its members/admins change (also how a newly added member learns about the group) |
+| `conversation_removed` | Server → Client | `{ conversationId }` | Sent to a user removed from (or leaving) a group; their sockets are also taken out of the group's room |
+
+Messages now also carry `messageType` (`text` / `image` / `system`), `attachment` (for images), `replyTo` (a snapshot of the quoted message with its sender's name) and `reactions`. **System messages** (`messageType: "system"`, e.g. "Ali renamed the group to …") are created by the server for group events and can't be edited, deleted, replied to or reacted to.
 
 ## Testing
 

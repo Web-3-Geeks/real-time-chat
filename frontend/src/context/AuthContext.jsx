@@ -1,5 +1,9 @@
 import { createContext, useState, useContext, useEffect } from 'react';
 import { connectSocket, disconnectSocket } from '../api/socket';
+import axiosInstance, { SESSION_EXPIRED_EVENT } from '../api/axiosInstance';
+
+// Read once by the login page to explain why the user was sent there.
+export const SESSION_EXPIRED_FLAG = 'sessionExpired';
 
 const AuthContext = createContext();
 
@@ -28,7 +32,15 @@ export const AuthProvider = ({ children }) => {
 
     socket.on('connect', () => setSocketStatus('connected'));
     socket.on('disconnect', () => setSocketStatus('disconnected'));
-    socket.on('connect_error', () => setSocketStatus('error'));
+    // The server's auth middleware rejects a bad/expired token with an
+    // "Not authorized..." error — that won't fix itself by retrying.
+    socket.on('connect_error', (err) => {
+      if (/not authorized/i.test(err?.message || '')) {
+        window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+      } else {
+        setSocketStatus('error');
+      }
+    });
     // socket.io-client retries automatically after a drop (network blip,
     // server restart) — these fire on the underlying Manager, not the
     // socket itself, and are what let the UI show "Reconnecting..."
@@ -39,7 +51,22 @@ export const AuthProvider = ({ children }) => {
 
   useEffect(() => {
     const token = localStorage.getItem('token');
-    if (token) attachSocket(token);
+    if (token) {
+      attachSocket(token);
+      // Validate the stored session once on load (and refresh name/avatar).
+      // A 401 here triggers the session-expired logout via the interceptor.
+      axiosInstance
+        .get('/auth/me')
+        .then(({ data }) =>
+          setUser((prev) => {
+            if (!prev) return prev;
+            const fresh = { ...prev, name: data.name, email: data.email, avatar: data.avatar };
+            localStorage.setItem('user', JSON.stringify(fresh));
+            return fresh;
+          })
+        )
+        .catch(() => {});
+    }
     // No disconnect-on-cleanup here: AuthProvider wraps the whole app and this
     // effect's cleanup would otherwise fire on React 18 StrictMode's dev-only
     // mount->cleanup->remount cycle, tearing down and recreating the socket
@@ -63,6 +90,17 @@ export const AuthProvider = ({ children }) => {
   disconnectSocket();
   setSocketStatus('disconnected');
 };
+
+  useEffect(() => {
+    const handleExpired = () => {
+      if (!localStorage.getItem('token')) return;
+      sessionStorage.setItem(SESSION_EXPIRED_FLAG, '1');
+      logout();
+    };
+    window.addEventListener(SESSION_EXPIRED_EVENT, handleExpired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, handleExpired);
+    // logout only touches state setters/storage, so the first render's copy is fine.
+  }, []);
 
   const updateUser = (updatedFields) => {
     setUser((prev) => {

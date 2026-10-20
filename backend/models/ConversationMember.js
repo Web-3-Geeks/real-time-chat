@@ -15,6 +15,13 @@ const conversationMemberSchema = new mongoose.Schema({
         type: Date,
         default: Date.now
     },
+    // Only meaningful for group conversations. Groups created before roles
+    // existed have no admin row — see getGroupAdminIds() for that fallback.
+    role: {
+        type: String,
+        enum: ['admin', 'member'],
+        default: 'member'
+    },
 })
 
 // Membership is checked on almost every socket event (join_conversation,

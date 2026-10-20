@@ -12,16 +12,45 @@ const messageSchema = new mongoose.Schema(
             ref: 'User',
             required: true
         },
+        // Optional for image messages (the caption), required for everything else.
         content: {
             type: String,
-            required: true,
+            required: function () {
+                return this.messageType !== 'image';
+            },
+            default: '',
             maxlength: 5000,
         },
+        // 'system' = auto-generated group events ("Ali added Sara"); these are
+        // never editable, deletable, reactable or reply-able.
         messageType: {
             type: String,
-            enum: ['text', 'image', 'file'],
+            enum: ['text', 'image', 'file', 'system'],
             default: 'text'
         },
+        attachment: {
+            key: { type: String },
+            mimeType: { type: String },
+            size: { type: Number },
+            width: { type: Number },
+            height: { type: Number },
+        },
+        replyTo: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Message',
+        },
+        // One reaction per user (picking another emoji replaces it).
+        reactions: [
+            {
+                _id: false,
+                emoji: { type: String, required: true },
+                userId: {
+                    type: mongoose.Schema.Types.ObjectId,
+                    ref: 'User',
+                    required: true,
+                },
+            },
+        ],
         deliveredTo: [
             {
                 type: mongoose.Schema.Types.ObjectId,

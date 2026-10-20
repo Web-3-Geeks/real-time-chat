@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import axiosInstance from '../api/axiosInstance';
-import { useAuth } from '../context/AuthContext';
+import { useAuth, SESSION_EXPIRED_FLAG } from '../context/AuthContext';
 import PasswordInput from '../components/PasswordInput';
+import { BrandMark } from '../components/Avatar';
+import ThemeToggle from '../components/ThemeToggle';
 
 function Login() {
   const [email, setEmail] = useState('');
@@ -10,6 +12,11 @@ function Login() {
   const [fieldErrors, setFieldErrors] = useState({});
   const [formError, setFormError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [sessionExpired] = useState(() => sessionStorage.getItem(SESSION_EXPIRED_FLAG) === '1');
+
+  useEffect(() => {
+    sessionStorage.removeItem(SESSION_EXPIRED_FLAG);
+  }, []);
 
   const { login } = useAuth();
   const navigate = useNavigate();
@@ -42,13 +49,23 @@ function Login() {
   };
 
   return (
-    <div className="min-h-svh flex items-center justify-center bg-page dark:bg-page-dark p-6">
-      <div className="w-full max-w-sm bg-surface dark:bg-surface-dark border border-line dark:border-line-dark rounded-2xl shadow-sm p-8">
-        <div className="w-10 h-10 rounded-lg bg-accent text-white flex items-center justify-center font-bold mb-5">
-          RC
+    <div className="relative min-h-svh flex items-center justify-center bg-page dark:bg-page-dark p-6">
+      <div className="absolute top-4 right-4">
+        <ThemeToggle />
+      </div>
+      <div className="w-full max-w-sm bg-surface dark:bg-surface-dark border border-line dark:border-line-dark rounded-3xl shadow-xl shadow-black/5 p-8">
+        <div className="flex items-center gap-2.5 mb-6 text-lg font-bold text-ink dark:text-ink-dark">
+          <BrandMark size="w-10 h-10 text-lg" />
+          RealChat
         </div>
         <h1 className="text-xl font-semibold text-ink dark:text-ink-dark">Welcome back</h1>
         <p className="text-sm text-muted mt-1 mb-6">Log in to continue chatting</p>
+
+        {sessionExpired && !formError && (
+          <div className="bg-accent-soft dark:bg-accent-soft-dark text-accent rounded-lg px-3 py-2.5 text-sm mb-4">
+            Your session has expired. Please log in again.
+          </div>
+        )}
 
         {formError && (
           <div className="bg-danger-soft text-danger rounded-lg px-3 py-2.5 text-sm mb-4">
@@ -90,7 +107,7 @@ function Login() {
           <button
             type="submit"
             disabled={isSubmitting}
-            className="mt-1 py-2.5 rounded-lg bg-accent text-white text-sm font-semibold hover:opacity-90 disabled:opacity-60 disabled:cursor-not-allowed transition-opacity"
+            className="mt-1 py-2.5 rounded-xl bg-linear-to-r from-accent-light to-accent text-white shadow-md shadow-accent/20 text-sm font-semibold hover:opacity-90 disabled:opacity-60 disabled:cursor-not-allowed transition-opacity"
           >
             {isSubmitting ? 'Logging in...' : 'Log in'}
           </button>

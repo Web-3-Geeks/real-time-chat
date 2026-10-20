@@ -1,26 +1,57 @@
 @import "tailwindcss";
 
+/* Dark mode follows the .dark class on <html> (set by the theme toggle /
+   the inline script in index.html) instead of only the OS setting. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
-  --color-page: #f4f5f9;
-  --color-page-dark: #101116;
+  --font-sans: 'Plus Jakarta Sans', system-ui, 'Segoe UI', Roboto, sans-serif;
+
+  --color-page: #f3f3f6;
+  --color-page-dark: #0e0f13;
   --color-surface: #ffffff;
-  --color-surface-dark: #191a21;
+  --color-surface-dark: #18191f;
   --color-ink: #16181d;
   --color-ink-dark: #f3f4f6;
   --color-muted: #8a8f98;
-  --color-line: #ececf0;
+  --color-line: #efeff3;
   --color-line-dark: #2a2c36;
-  --color-accent: #fd6d3d;
-  --color-accent-soft: #fdece5;
-  --color-nav-active: #eef1fd;
-  --color-nav-active-dark: #262a45;
-  --color-nav-active-ink: #4f5bd5;
-  --color-nav-active-ink-dark: #9aa4ff;
+  --color-accent: #f4691f;
+  --color-accent-light: #fb9b5f;
+  --color-accent-soft: #fff1e8;
+  --color-accent-soft-dark: #3a2418;
+  --color-thread: #f7f7f9;
+  --color-thread-dark: #121318;
+  --color-nav-active: #f4f4f7;
+  --color-nav-active-dark: #23252e;
+  --color-nav-active-ink: #f4691f;
+  --color-nav-active-ink-dark: #fb9b5f;
   --color-danger: #e0433d;
   --color-danger-soft: #fbe7e6;
 }
 
+html.dark {
+  color-scheme: dark;
+}
+
 body {
   margin: 0;
-  font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Thin, unobtrusive scrollbars for the inner panes (list + thread). */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #d9d9e0 transparent;
+}
+.dark .scroll-thin {
+  scrollbar-color: #3a3d4a transparent;
+}
+
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
 }

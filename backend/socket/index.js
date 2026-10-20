@@ -3,7 +3,13 @@ const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
 const ConversationMember = require("../models/ConversationMember");
 const Message = require("../models/Message");
+const Attachment = require("../models/Attachment");
 const connectDB = require("../config/db");
+const {
+  ALLOWED_REACTIONS,
+  loadReplySnapshot,
+  toMessagePayload,
+} = require("../services/chatService");
 
 // A malformed id (not a valid ObjectId) would otherwise reach Mongoose and
 // throw a CastError — safe() stops that from crashing the process, but every
@@ -142,7 +148,8 @@ const initSocket = (httpServer) => {
       socket.on(
         "send_message",
         safe(async (data, callback) => {
-          const { conversationId, content } = data || {};
+          const { conversationId, replyTo, attachmentKey } = data || {};
+          const content = typeof data?.content === "string" ? data.content : "";
 
           if (!isValidId(conversationId)) {
             if (callback) callback({ success: false, message: "Invalid conversation id" });
@@ -159,7 +166,8 @@ const initSocket = (httpServer) => {
             return;
           }
 
-          if (!content || !content.trim()) {
+          // An image message may have an empty caption; anything else needs text.
+          if (!attachmentKey && !content.trim()) {
             if (callback) callback({ success: false, message: "Message cannot be empty" });
             return;
           }
@@ -169,23 +177,42 @@ const initSocket = (httpServer) => {
             return;
           }
 
+          let attachment;
+          if (attachmentKey) {
+            // Only the uploader can attach an upload, and only once.
+            const upload =
+              typeof attachmentKey === "string" &&
+              (await Attachment.findOne({ key: attachmentKey, uploadedBy: socket.userId }).select("key mimeType size"));
+            const alreadyUsed = upload && (await Message.exists({ "attachment.key": attachmentKey }));
+            if (!upload || alreadyUsed) {
+              if (callback) callback({ success: false, message: "Image not found. Please upload it again." });
+              return;
+            }
+            attachment = { key: upload.key, mimeType: upload.mimeType, size: upload.size };
+          }
+
+          if (replyTo !== undefined && replyTo !== null) {
+            const original =
+              isValidId(replyTo) &&
+              (await Message.exists({ _id: replyTo, conversationId, messageType: { $ne: "system" } }));
+            if (!original) {
+              if (callback) callback({ success: false, message: "The message you replied to no longer exists" });
+              return;
+            }
+          }
+
           const message = await Message.create({
             conversationId,
             senderId: socket.userId,
             content: content.trim(),
+            messageType: attachment ? "image" : "text",
+            attachment,
+            replyTo: replyTo || undefined,
           });
 
           stopTyping(conversationId);
 
-          const payload = {
-            id: message._id,
-            conversationId: message.conversationId,
-            senderId: message.senderId,
-            content: message.content,
-            createdAt: message.createdAt,
-            edited: false,
-            isDeleted: false,
-          };
+          const payload = toMessagePayload(message, await loadReplySnapshot(message.replyTo));
 
           // Deliver to every member's personal room (joined by userId on connect),
           // not just the conversation room — a member who hasn't opened this
@@ -286,6 +313,11 @@ const initSocket = (httpServer) => {
             return;
           }
 
+          if (message.messageType === "system") {
+            if (callback) callback({ success: false, message: "System messages cannot be edited" });
+            return;
+          }
+
           if (!content || !content.trim()) {
             if (callback) callback({ success: false, message: "Message cannot be empty" });
             return;
@@ -329,9 +361,22 @@ const initSocket = (httpServer) => {
             return;
           }
 
+          if (message.messageType === "system") {
+            if (callback) callback({ success: false, message: "System messages cannot be deleted" });
+            return;
+          }
+
+          // Drop the stored image too: a deleted message must not keep its
+          // file reachable by URL.
+          const attachmentKey = message.attachment?.key;
+
           message.isDeleted = true;
           message.content = "This message was deleted.";
+          message.attachment = undefined;
+          message.reactions = [];
           await message.save();
+
+          if (attachmentKey) await Attachment.deleteOne({ key: attachmentKey });
 
           const memberIds = await ConversationMember.find({
             conversationId: message.conversationId,
@@ -347,6 +392,62 @@ const initSocket = (httpServer) => {
           });
 
           if (callback) callback({ success: true });
+        }),
+      );
+
+      socket.on(
+        "react_message",
+        safe(async ({ messageId, emoji } = {}, callback) => {
+          if (!isValidId(messageId)) {
+            if (callback) callback({ success: false, message: "Invalid message id" });
+            return;
+          }
+
+          if (!ALLOWED_REACTIONS.includes(emoji)) {
+            if (callback) callback({ success: false, message: "Unsupported reaction" });
+            return;
+          }
+
+          const message = await Message.findById(messageId);
+          if (!message || message.isDeleted || message.messageType === "system") {
+            if (callback) callback({ success: false, message: "Cannot react to this message" });
+            return;
+          }
+
+          const isMember = await ConversationMember.findOne({
+            conversationId: message.conversationId,
+            userId: socket.userId,
+          });
+          if (!isMember) {
+            if (callback) callback({ success: false, message: "Not a member of this conversation" });
+            return;
+          }
+
+          // One reaction per user: the same emoji again removes it, a
+          // different one replaces it.
+          const existing = message.reactions.find((r) => r.userId.toString() === socket.userId);
+          const removing = existing && existing.emoji === emoji;
+          message.reactions = message.reactions.filter((r) => r.userId.toString() !== socket.userId);
+          if (!removing) message.reactions.push({ emoji, userId: socket.userId });
+          await message.save();
+
+          const reactions = message.reactions.map((r) => ({
+            emoji: r.emoji,
+            userId: r.userId.toString(),
+          }));
+
+          const memberIds = await ConversationMember.find({
+            conversationId: message.conversationId,
+          }).distinct("userId");
+          memberIds.forEach((memberId) => {
+            io.to(memberId.toString()).emit("message_reacted", {
+              id: message._id.toString(),
+              conversationId: message.conversationId.toString(),
+              reactions,
+            });
+          });
+
+          if (callback) callback({ success: true, reactions });
         }),
       );
 
